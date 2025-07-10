@@ -15,6 +15,8 @@ COPY . .
 
 RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o summarybot .
 
+RUN ls -la summarybot && file summarybot
+
 FROM alpine:latest
 
 RUN apk --no-cache add \
@@ -23,18 +25,21 @@ RUN apk --no-cache add \
     tzdata \
     wget
 
-
-RUN mkdir -p /data
-RUN adduser -D -u 1000 appuser
-RUN mkdir -p /app && \
+RUN adduser -D -u 1000 appuser && \
+    mkdir -p /app /data && \
     chown -R appuser:appuser /app /data
 
-WORKDIR /app/
+COPY --from=builder --chown=appuser:appuser /app/summarybot /app/summarybot
 
-COPY --from=builder /app/summarybot .
+RUN chmod +x /app/summarybot
 
 USER appuser
 
+WORKDIR /app
+
+RUN ls -la /app/summarybot && file /app/summarybot
+
+# Открываем порт
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
