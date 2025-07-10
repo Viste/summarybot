@@ -1,3 +1,4 @@
+[![Deploy Summary Bot](https://github.com/Viste/summarybot/actions/workflows/deploy.yml/badge.svg)](https://github.com/Viste/summarybot/actions/workflows/deploy.yml) 
 # SummaryBot 🤖
 
 Telegram бот на Go для создания резюме сообщений чата с использованием ИИ.
