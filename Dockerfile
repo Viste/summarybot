@@ -15,7 +15,7 @@ COPY . .
 
 RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o summarybot .
 
-FROM debian:bookworm-slim
+FROM alpine:latest
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
@@ -24,15 +24,15 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
+
+RUN mkdir -p /data
+RUN adduser -D -u 1000 appuser
+RUN mkdir -p /app && \
+    chown -R appuser:appuser /app /data
+
 WORKDIR /app/
 
 COPY --from=builder /app/summarybot .
-
-RUN mkdir -p /data
-
-RUN addgroup -g 1001 -S appgroup && \
-    adduser -u 1001 -S appuser -G appgroup && \
-    chown -R appuser:appgroup /app /data
 
 USER appuser
 
