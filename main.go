@@ -20,12 +20,17 @@ import (
 )
 
 type Config struct {
-	TelegramToken string
-	OpenAIAPIKey  string
-	OpenAIBaseURL string
-	DatabasePath  string
-	Port          string
-	BotUsername   string
+	TelegramToken   string
+	OpenAIAPIKey    string
+	OpenAIBaseURL   string
+	DatabasePath    string
+	Port            string
+	BotUsername     string
+	AllowedChats    []int64
+	AdminUserIDs    []int64
+	RequireApproval bool
+	OpenAIModel     string
+	MaxTokens       int
 }
 
 type Message struct {
@@ -46,6 +51,24 @@ type ChatSummary struct {
 	CreatedAt time.Time
 }
 
+type AllowedChat struct {
+	ID        uint  `gorm:"primaryKey"`
+	ChatID    int64 `gorm:"uniqueIndex"`
+	ChatTitle string
+	AddedBy   int64
+	CreatedAt time.Time
+}
+
+type ChatApprovalRequest struct {
+	ID        uint  `gorm:"primaryKey"`
+	ChatID    int64 `gorm:"index"`
+	ChatTitle string
+	UserID    int64
+	Username  string
+	Status    string `gorm:"default:'pending'"`
+	CreatedAt time.Time
+}
+
 type Bot struct {
 	telebot *telebot.Bot
 	db      *gorm.DB
@@ -54,13 +77,25 @@ type Bot struct {
 }
 
 func loadConfig() *Config {
+	maxTokens := 1200
+	if tokensStr := getEnv("OPENAI_MAX_TOKENS", ""); tokensStr != "" {
+		if parsed, err := strconv.Atoi(tokensStr); err == nil && parsed > 0 {
+			maxTokens = parsed
+		}
+	}
+
 	return &Config{
-		TelegramToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
-		OpenAIAPIKey:  getEnv("OPENAI_API_KEY", ""),
-		OpenAIBaseURL: getEnv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-		DatabasePath:  getEnv("DATABASE_PATH", "./summarybot.db"),
-		Port:          getEnv("PORT", "8080"),
-		BotUsername:   getEnv("BOT_USERNAME", "zagichak_bot"),
+		TelegramToken:   getEnv("TELEGRAM_BOT_TOKEN", ""),
+		OpenAIAPIKey:    getEnv("OPENAI_API_KEY", ""),
+		OpenAIBaseURL:   getEnv("OPENAI_BASE_URL", "http://31.172.78.152:9000/v1"),
+		DatabasePath:    getEnv("DATABASE_PATH", "./summarybot.db"),
+		Port:            getEnv("PORT", "8080"),
+		BotUsername:     getEnv("BOT_USERNAME", "zagichak_bot"),
+		AllowedChats:    parseInt64List(getEnv("ALLOWED_CHATS", "")),
+		AdminUserIDs:    parseInt64List(getEnv("ADMIN_USER_IDS", "")),
+		RequireApproval: getEnv("REQUIRE_APPROVAL", "true") == "true",
+		OpenAIModel:     getEnv("OPENAI_MODEL", "gpt-4o-mini"),
+		MaxTokens:       maxTokens,
 	}
 }
 
@@ -71,6 +106,28 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func parseInt64List(str string) []int64 {
+	if str == "" {
+		return []int64{}
+	}
+
+	parts := strings.Split(str, ",")
+	result := make([]int64, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if id, err := strconv.ParseInt(part, 10, 64); err == nil {
+			result = append(result, id)
+		}
+	}
+
+	return result
+}
+
 func initDatabase(dbPath string) (*gorm.DB, error) {
 	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
@@ -79,7 +136,8 @@ func initDatabase(dbPath string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	err = db.AutoMigrate(&Message{}, &ChatSummary{})
+	// Автомиграция
+	err = db.AutoMigrate(&Message{}, &ChatSummary{}, &AllowedChat{}, &ChatApprovalRequest{})
 	if err != nil {
 		return nil, err
 	}
@@ -95,8 +153,81 @@ func initOpenAI(config *Config) *openai.Client {
 	return openai.NewClientWithConfig(clientConfig)
 }
 
+func (b *Bot) isChatAllowed(chatID int64) bool {
+	if chatID > 0 {
+		return true
+	}
+
+	for _, allowedID := range b.config.AllowedChats {
+		if allowedID == chatID {
+			return true
+		}
+	}
+
+	var count int64
+	b.db.Model(&AllowedChat{}).Where("chat_id = ?", chatID).Count(&count)
+	return count > 0
+}
+
+func (b *Bot) isAdmin(userID int64) bool {
+	for _, adminID := range b.config.AdminUserIDs {
+		if adminID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bot) requestChatApproval(chatID int64, chatTitle string, userID int64, username string) {
+	var existingRequest ChatApprovalRequest
+	result := b.db.Where("chat_id = ? AND status = 'pending'", chatID).First(&existingRequest)
+	if result.Error == nil {
+		return
+	}
+
+	request := ChatApprovalRequest{
+		ChatID:    chatID,
+		ChatTitle: chatTitle,
+		UserID:    userID,
+		Username:  username,
+		Status:    "pending",
+	}
+
+	b.db.Create(&request)
+
+	b.notifyAdminsAboutNewRequest(request)
+}
+
+func (b *Bot) notifyAdminsAboutNewRequest(request ChatApprovalRequest) {
+	if len(b.config.AdminUserIDs) == 0 {
+		return
+	}
+
+	message := fmt.Sprintf("🔐 **Новый запрос доступа**\n\n"+
+		"**Чат:** %s (%d)\n"+
+		"**Пользователь:** @%s (%d)\n\n"+
+		"Используйте команды:\n"+
+		"• `/approve %d` - разрешить\n"+
+		"• `/reject %d` - отклонить\n"+
+		"• `/pending` - показать все запросы",
+		request.ChatTitle, request.ChatID,
+		request.Username, request.UserID,
+		request.ChatID, request.ChatID)
+
+	for _, adminID := range b.config.AdminUserIDs {
+		chat := &telebot.Chat{ID: adminID}
+		b.telebot.Send(chat, message, &telebot.SendOptions{
+			ParseMode: telebot.ModeMarkdown,
+		})
+	}
+}
+
 func (b *Bot) saveMessage(m *telebot.Message) {
 	if m.Text == "" {
+		return
+	}
+
+	if !b.isChatAllowed(m.Chat.ID) {
 		return
 	}
 
@@ -135,33 +266,51 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 			msg.Timestamp.Format("15:04"), msg.Username, msg.Text))
 	}
 
-	prompt := fmt.Sprintf(`Проанализируй сообщения из Telegram чата за %s и создай краткое резюме самых интересных моментов на русском языке. 
+	prompt := fmt.Sprintf(`Проанализируй сообщения из Telegram чата за %s и создай детальное резюме самых интересных моментов на русском языке. 
 
 Сообщения:
 %s
 
 Требования к резюме:
-- Выдели 3-5 самых интересных/важных тем или событий
-- Используй эмодзи для лучшего восприятия
-- Будь кратким, но информативным
-- Пиши в неформальном стиле
-- Если есть важные ссылки или упоминания, включи их
-- Если ничего особенно интересного не было, скажи об этом честно
+- Выдели 5-8 самых интересных/важных тем, событий или дискуссий
+- Используй подходящие эмодзи для каждой темы
+- Для каждой темы дай 2-3 предложения описания
+- Сохраняй важные детали и контекст
+- Если есть ссылки, упоминания людей или важные решения - обязательно включи
+- Пиши в живом, неформальном стиле как для друзей
+- Если было мало активности или ничего интересного - честно об этом скажи
+- Группируй связанные сообщения по темам
 
-Формат ответа: просто текст резюме без дополнительных пояснений.`,
-		period, textBuilder.String())
+Формат ответа: 
+📝 **Резюме за %s**
+
+🔥 **Горячие темы:**
+• [тема 1 с эмодзи] - описание
+• [тема 2 с эмодзи] - описание
+...
+
+💬 **Интересные моменты:**
+• [момент 1] 
+• [момент 2]
+...
+
+🔗 **Важные ссылки/решения:** (если есть)
+• [ссылка/решение]
+
+Только основной текст резюме, без дополнительных пояснений.`,
+		period, textBuilder.String(), period)
 
 	resp, err := b.openai.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
-			Model: openai.GPT3Dot5Turbo,
+			Model: b.config.OpenAIModel,
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
 					Content: prompt,
 				},
 			},
-			MaxTokens:   500,
+			MaxTokens:   b.config.MaxTokens,
 			Temperature: 0.7,
 		},
 	)
@@ -179,6 +328,23 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 
 func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 	message := c.Message()
+
+	if !b.isChatAllowed(c.Chat().ID) {
+		if b.config.RequireApproval && c.Chat().ID < 0 {
+			chatTitle := c.Chat().Title
+			if chatTitle == "" {
+				chatTitle = "Неизвестный чат"
+			}
+
+			b.requestChatApproval(c.Chat().ID, chatTitle, c.Sender().ID, c.Sender().Username)
+
+			return c.Reply("❌ Доступ к этому чату не разрешен.\n\n" +
+				"📝 Запрос на одобрение отправлен администраторам.\n" +
+				"⏳ Ожидайте подтверждения доступа.")
+		}
+
+		return c.Reply("❌ У меня нет доступа к этому чату.")
+	}
 
 	if !strings.Contains(message.Text, "@"+b.config.BotUsername) {
 		return nil
@@ -234,7 +400,6 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 	}
 	b.db.Create(&chatSummary)
 
-	// Удаляем статус и отправляем резюме
 	c.Bot().Delete(statusMsg)
 
 	summaryText := fmt.Sprintf("📋 **Резюме за %s**\n\n%s\n\n_Проанализировано сообщений: %d_",
@@ -246,6 +411,23 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 }
 
 func (b *Bot) handleStart(c telebot.Context) error {
+	if c.Chat().ID < 0 && !b.isChatAllowed(c.Chat().ID) {
+		if b.config.RequireApproval {
+			chatTitle := c.Chat().Title
+			if chatTitle == "" {
+				chatTitle = "Неизвестный чат"
+			}
+
+			b.requestChatApproval(c.Chat().ID, chatTitle, c.Sender().ID, c.Sender().Username)
+
+			return c.Reply("❌ Доступ к этому чату не разрешен.\n\n" +
+				"📝 Запрос на одобрение отправлен администраторам.\n" +
+				"⏳ Ожидайте подтверждения доступа.")
+		}
+
+		return c.Reply("❌ У меня нет доступа к этому чату.")
+	}
+
 	welcomeText := `Привет! 👋 
 
 Я бот для создания резюме чата. Просто упомяни меня и скажи:
@@ -257,6 +439,126 @@ func (b *Bot) handleStart(c telebot.Context) error {
 Я проанализирую сообщения и выдам самое интересное! 🤖✨`
 
 	return c.Reply(welcomeText)
+}
+
+func (b *Bot) handleApprove(c telebot.Context) error {
+	if !b.isAdmin(c.Sender().ID) {
+		return c.Reply("❌ У вас нет прав администратора.")
+	}
+
+	args := strings.Fields(c.Message().Text)
+	if len(args) < 2 {
+		return c.Reply("📝 Использование: `/approve <chat_id>`")
+	}
+
+	chatID, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return c.Reply("❌ Неверный формат chat_id")
+	}
+
+	result := b.db.Model(&ChatApprovalRequest{}).
+		Where("chat_id = ? AND status = 'pending'", chatID).
+		Update("status", "approved")
+
+	if result.RowsAffected == 0 {
+		return c.Reply("❌ Запрос не найден или уже обработан")
+	}
+
+	allowedChat := AllowedChat{
+		ChatID:  chatID,
+		AddedBy: c.Sender().ID,
+	}
+
+	var request ChatApprovalRequest
+	if b.db.Where("chat_id = ?", chatID).First(&request).Error == nil {
+		allowedChat.ChatTitle = request.ChatTitle
+	}
+
+	b.db.Create(&allowedChat)
+
+	return c.Reply(fmt.Sprintf("✅ Чат %d одобрен и добавлен в разрешенные!", chatID))
+}
+
+func (b *Bot) handleReject(c telebot.Context) error {
+	if !b.isAdmin(c.Sender().ID) {
+		return c.Reply("❌ У вас нет прав администратора.")
+	}
+
+	args := strings.Fields(c.Message().Text)
+	if len(args) < 2 {
+		return c.Reply("📝 Использование: `/reject <chat_id>`")
+	}
+
+	chatID, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return c.Reply("❌ Неверный формат chat_id")
+	}
+
+	result := b.db.Model(&ChatApprovalRequest{}).
+		Where("chat_id = ? AND status = 'pending'", chatID).
+		Update("status", "rejected")
+
+	if result.RowsAffected == 0 {
+		return c.Reply("❌ Запрос не найден или уже обработан")
+	}
+
+	return c.Reply(fmt.Sprintf("🚫 Запрос для чата %d отклонен.", chatID))
+}
+
+func (b *Bot) handlePending(c telebot.Context) error {
+	if !b.isAdmin(c.Sender().ID) {
+		return c.Reply("❌ У вас нет прав администратора.")
+	}
+
+	var requests []ChatApprovalRequest
+	b.db.Where("status = 'pending'").Order("created_at DESC").Find(&requests)
+
+	if len(requests) == 0 {
+		return c.Reply("📭 Нет ожидающих запросов.")
+	}
+
+	var response strings.Builder
+	response.WriteString("📋 **Ожидающие запросы:**\n\n")
+
+	for _, req := range requests {
+		response.WriteString(fmt.Sprintf("🔹 **%s** (%d)\n", req.ChatTitle, req.ChatID))
+		response.WriteString(fmt.Sprintf("   👤 @%s (%d)\n", req.Username, req.UserID))
+		response.WriteString(fmt.Sprintf("   📅 %s\n", req.CreatedAt.Format("02.01.2006 15:04")))
+		response.WriteString(fmt.Sprintf("   • `/approve %d` `/reject %d`\n\n", req.ChatID, req.ChatID))
+	}
+
+	return c.Reply(response.String(), &telebot.SendOptions{
+		ParseMode: telebot.ModeMarkdown,
+	})
+}
+
+func (b *Bot) handleAllowedChats(c telebot.Context) error {
+	if !b.isAdmin(c.Sender().ID) {
+		return c.Reply("❌ У вас нет прав администратора.")
+	}
+
+	var chats []AllowedChat
+	b.db.Order("created_at DESC").Find(&chats)
+
+	var response strings.Builder
+	response.WriteString("📋 **Разрешенные чаты:**\n\n")
+
+	for _, chatID := range b.config.AllowedChats {
+		response.WriteString(fmt.Sprintf("🔹 %d (из конфига)\n", chatID))
+	}
+
+	for _, chat := range chats {
+		response.WriteString(fmt.Sprintf("🔹 **%s** (%d)\n", chat.ChatTitle, chat.ChatID))
+		response.WriteString(fmt.Sprintf("   📅 %s\n\n", chat.CreatedAt.Format("02.01.2006 15:04")))
+	}
+
+	if len(chats) == 0 && len(b.config.AllowedChats) == 0 {
+		response.WriteString("📭 Нет разрешенных чатов.")
+	}
+
+	return c.Reply(response.String(), &telebot.SendOptions{
+		ParseMode: telebot.ModeMarkdown,
+	})
 }
 
 func (b *Bot) startHealthServer() {
@@ -300,9 +602,14 @@ func main() {
 	}
 
 	tgBot.Handle("/start", bot.handleStart)
+	tgBot.Handle("/approve", bot.handleApprove)
+	tgBot.Handle("/reject", bot.handleReject)
+	tgBot.Handle("/pending", bot.handlePending)
+	tgBot.Handle("/allowed", bot.handleAllowedChats)
 	tgBot.Handle(telebot.OnText, func(c telebot.Context) error {
 		bot.saveMessage(c.Message())
 
+		// Проверяем, есть ли упоминание бота
 		if strings.Contains(c.Message().Text, "@"+config.BotUsername) {
 			return bot.handleSummaryRequest(c)
 		}
