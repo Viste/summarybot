@@ -203,22 +203,20 @@ func (b *Bot) notifyAdminsAboutNewRequest(request ChatApprovalRequest) {
 		return
 	}
 
-	message := fmt.Sprintf("🔐 **Новый запрос доступа**\n\n"+
-		"**Чат:** %s (%d)\n"+
-		"**Пользователь:** @%s (%d)\n\n"+
+	message := fmt.Sprintf("🔐 Новый запрос доступа\n\n"+
+		"Чат: %s (%d)\n"+
+		"Пользователь: @%s (%d)\n\n"+
 		"Используйте команды:\n"+
-		"• `/approve %d` - разрешить\n"+
-		"• `/reject %d` - отклонить\n"+
-		"• `/pending` - показать все запросы",
+		"• /approve %d - разрешить\n"+
+		"• /reject %d - отклонить\n"+
+		"• /pending - показать все запросы",
 		request.ChatTitle, request.ChatID,
 		request.Username, request.UserID,
 		request.ChatID, request.ChatID)
 
 	for _, adminID := range b.config.AdminUserIDs {
 		chat := &telebot.Chat{ID: adminID}
-		b.telebot.Send(chat, message, &telebot.SendOptions{
-			ParseMode: telebot.ModeMarkdown,
-		})
+		b.telebot.Send(chat, message)
 	}
 }
 
@@ -280,21 +278,23 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 - Пиши в живом, неформальном стиле как для друзей
 - Если было мало активности или ничего интересного - честно об этом скажи
 - Группируй связанные сообщения по темам
+- НЕ используй звездочки (*), подчеркивания (_), квадратные скобки для выделения текста
+- Используй только эмодзи и обычный текст без специальных символов форматирования
 
 Формат ответа: 
-📝 **Резюме за %s**
+📝 Резюме за %s
 
-🔥 **Горячие темы:**
+🔥 Горячие темы:
 • [тема 1 с эмодзи] - описание
 • [тема 2 с эмодзи] - описание
 ...
 
-💬 **Интересные моменты:**
+💬 Интересные моменты:
 • [момент 1] 
 • [момент 2]
 ...
 
-🔗 **Важные ссылки/решения:** (если есть)
+🔗 Важные ссылки/решения: (если есть)
 • [ссылка/решение]
 
 Только основной текст резюме, без дополнительных пояснений.`,
@@ -402,12 +402,10 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 
 	c.Bot().Delete(statusMsg)
 
-	summaryText := fmt.Sprintf("📋 **Резюме за %s**\n\n%s\n\n_Проанализировано сообщений: %d_",
+	summaryText := fmt.Sprintf("📋 Резюме за %s\n\n%s\n\n_Проанализировано сообщений: %d_",
 		period, summary, len(messages))
 
-	return c.Reply(summaryText, &telebot.SendOptions{
-		ParseMode: telebot.ModeMarkdown,
-	})
+	return c.Reply(summaryText)
 }
 
 func (b *Bot) handleStart(c telebot.Context) error {
@@ -518,18 +516,16 @@ func (b *Bot) handlePending(c telebot.Context) error {
 	}
 
 	var response strings.Builder
-	response.WriteString("📋 **Ожидающие запросы:**\n\n")
+	response.WriteString("📋 Ожидающие запросы:\n\n")
 
 	for _, req := range requests {
-		response.WriteString(fmt.Sprintf("🔹 **%s** (%d)\n", req.ChatTitle, req.ChatID))
+		response.WriteString(fmt.Sprintf("🔹 %s (%d)\n", req.ChatTitle, req.ChatID))
 		response.WriteString(fmt.Sprintf("   👤 @%s (%d)\n", req.Username, req.UserID))
 		response.WriteString(fmt.Sprintf("   📅 %s\n", req.CreatedAt.Format("02.01.2006 15:04")))
-		response.WriteString(fmt.Sprintf("   • `/approve %d` `/reject %d`\n\n", req.ChatID, req.ChatID))
+		response.WriteString(fmt.Sprintf("   • /approve %d /reject %d\n\n", req.ChatID, req.ChatID))
 	}
 
-	return c.Reply(response.String(), &telebot.SendOptions{
-		ParseMode: telebot.ModeMarkdown,
-	})
+	return c.Reply(response.String())
 }
 
 func (b *Bot) handleAllowedChats(c telebot.Context) error {
@@ -541,14 +537,14 @@ func (b *Bot) handleAllowedChats(c telebot.Context) error {
 	b.db.Order("created_at DESC").Find(&chats)
 
 	var response strings.Builder
-	response.WriteString("📋 **Разрешенные чаты:**\n\n")
+	response.WriteString("📋 Разрешенные чаты:\n\n")
 
 	for _, chatID := range b.config.AllowedChats {
 		response.WriteString(fmt.Sprintf("🔹 %d (из конфига)\n", chatID))
 	}
 
 	for _, chat := range chats {
-		response.WriteString(fmt.Sprintf("🔹 **%s** (%d)\n", chat.ChatTitle, chat.ChatID))
+		response.WriteString(fmt.Sprintf("🔹 %s (%d)\n", chat.ChatTitle, chat.ChatID))
 		response.WriteString(fmt.Sprintf("   📅 %s\n\n", chat.CreatedAt.Format("02.01.2006 15:04")))
 	}
 
@@ -556,9 +552,7 @@ func (b *Bot) handleAllowedChats(c telebot.Context) error {
 		response.WriteString("📭 Нет разрешенных чатов.")
 	}
 
-	return c.Reply(response.String(), &telebot.SendOptions{
-		ParseMode: telebot.ModeMarkdown,
-	})
+	return c.Reply(response.String())
 }
 
 func (b *Bot) startHealthServer() {
