@@ -35,9 +35,8 @@ USER appuser
 
 WORKDIR /app
 
-RUN ls -la /app/summarybot && file /app/summarybot
+RUN ls -la /app/summarybot
 
-# Открываем порт
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
