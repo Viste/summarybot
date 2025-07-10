@@ -136,7 +136,6 @@ func initDatabase(dbPath string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// Автомиграция
 	err = db.AutoMigrate(&Message{}, &ChatSummary{}, &AllowedChat{}, &ChatApprovalRequest{})
 	if err != nil {
 		return nil, err
@@ -282,7 +281,6 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 - Используй только эмодзи и обычный текст без специальных символов форматирования
 
 Формат ответа: 
-📝 Резюме за %s
 
 🔥 Горячие темы:
 • [тема 1 с эмодзи] - описание
@@ -311,7 +309,7 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 				},
 			},
 			MaxTokens:   b.config.MaxTokens,
-			Temperature: 0.7,
+			Temperature: 0.2,
 		},
 	)
 
