@@ -17,12 +17,11 @@ RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o summarybot .
 
 FROM alpine:latest
 
-RUN apt-get update && apt-get install -y \
+RUN apk --no-cache add \
     ca-certificates \
-    sqlite3 \
+    sqlite \
     tzdata \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+    wget
 
 
 RUN mkdir -p /data
