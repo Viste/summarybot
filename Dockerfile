@@ -15,8 +15,6 @@ COPY . .
 
 RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o summarybot .
 
-RUN ls -la summarybot && file summarybot
-
 FROM alpine:latest
 
 RUN apk --no-cache add \
