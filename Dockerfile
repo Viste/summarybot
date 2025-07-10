@@ -25,13 +25,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-RUN useradd -r -u 1000 -m -d /app -s /bin/bash appuser && \
-    mkdir -p /data && \
-    chown -R appuser:appuser /app /data
+RUN mkdir -p /data /app
 
-COPY --from=builder --chown=appuser:appuser /app/summarybot /app/summarybot
-
-USER appuser
+COPY --from=builder /app/summarybot /app/summarybot
 
 WORKDIR /app
 
