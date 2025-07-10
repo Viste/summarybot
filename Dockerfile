@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /root/
+WORKDIR /app/
 
 COPY --from=builder /app/summarybot .
 
@@ -32,7 +32,7 @@ RUN mkdir -p /data
 
 RUN addgroup -g 1001 -S appgroup && \
     adduser -u 1001 -S appuser -G appgroup && \
-    chown -R appuser:appgroup /root /data
+    chown -R appuser:appgroup /app /data
 
 USER appuser
 
