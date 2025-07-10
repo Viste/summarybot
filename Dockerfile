@@ -15,27 +15,25 @@ COPY . .
 
 RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o summarybot .
 
-FROM alpine:latest
+FROM ubuntu:22.04
 
-RUN apk --no-cache add \
+RUN apt-get update && apt-get install -y \
     ca-certificates \
-    sqlite \
+    sqlite3 \
+    wget \
     tzdata \
-    wget
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-RUN adduser -D -u 1000 appuser && \
-    mkdir -p /app /data && \
+RUN useradd -r -u 1000 -m -d /app -s /bin/bash appuser && \
+    mkdir -p /data && \
     chown -R appuser:appuser /app /data
 
 COPY --from=builder --chown=appuser:appuser /app/summarybot /app/summarybot
 
-RUN chmod +x /app/summarybot
-
 USER appuser
 
 WORKDIR /app
-
-RUN ls -la /app/summarybot
 
 EXPOSE 8080
 
