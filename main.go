@@ -870,14 +870,33 @@ func main() {
 
 		if strings.Contains(message.Text, "@"+config.BotUsername) {
 			log.Printf("Обнаружено упоминание бота в сообщении: %s", message.Text)
+
+			if bot.isRoastMessage(message.Text) {
+				log.Printf("Это провокация, отвечаем умнику")
+				return bot.handleRoast(c)
+			}
+
+			log.Printf("Это запрос резюме")
 			return bot.handleSummaryRequest(c)
 		}
 
-		if bot.isRoastMessage(message.Text) {
-			return bot.handleRoast(c)
+		return nil
+	})
+	tgBot.Handle("/debug", func(c telebot.Context) error {
+		if !bot.isAdmin(c.Sender().ID) {
+			return c.Reply("❌ Только для админов")
 		}
 
-		return nil
+		var count int64
+		today := time.Now().Truncate(24 * time.Hour)
+		tomorrow := today.Add(24 * time.Hour)
+
+		bot.db.Model(&Message{}).
+			Where("chat_id = ? AND timestamp >= ? AND timestamp < ?",
+				c.Chat().ID, today, tomorrow).
+			Count(&count)
+
+		return c.Reply(fmt.Sprintf("💾 Сегодня сохранено сообщений: %d\n📋 Chat ID: %d", count, c.Chat().ID))
 	})
 
 	go bot.startHealthServer()
