@@ -20,17 +20,18 @@ import (
 )
 
 type Config struct {
-	TelegramToken   string
-	OpenAIAPIKey    string
-	OpenAIBaseURL   string
-	DatabasePath    string
-	Port            string
-	BotUsername     string
-	AllowedChats    []int64
-	AdminUserIDs    []int64
-	RequireApproval bool
-	OpenAIModel     string
-	MaxTokens       int
+	TelegramToken    string
+	OpenAIAPIKey     string
+	OpenAIBaseURL    string
+	DatabasePath     string
+	Port             string
+	BotUsername      string
+	AllowedChats     []int64
+	AdminUserIDs     []int64
+	RequireApproval  bool
+	OpenAIModel      string
+	MaxTokens        int
+	MinMessagesForAI int
 }
 
 type Message struct {
@@ -84,18 +85,26 @@ func loadConfig() *Config {
 		}
 	}
 
+	minMessages := 20
+	if minStr := getEnv("MIN_MESSAGES_FOR_AI", ""); minStr != "" {
+		if parsed, err := strconv.Atoi(minStr); err == nil && parsed > 0 {
+			minMessages = parsed
+		}
+	}
+
 	return &Config{
-		TelegramToken:   getEnv("TELEGRAM_BOT_TOKEN", ""),
-		OpenAIAPIKey:    getEnv("OPENAI_API_KEY", ""),
-		OpenAIBaseURL:   getEnv("OPENAI_BASE_URL", "http://31.172.78.152:9000/v1"),
-		DatabasePath:    getEnv("DATABASE_PATH", "./summarybot.db"),
-		Port:            getEnv("PORT", "8080"),
-		BotUsername:     getEnv("BOT_USERNAME", "zagichak_bot"),
-		AllowedChats:    parseInt64List(getEnv("ALLOWED_CHATS", "")),
-		AdminUserIDs:    parseInt64List(getEnv("ADMIN_USER_IDS", "")),
-		RequireApproval: getEnv("REQUIRE_APPROVAL", "true") == "true",
-		OpenAIModel:     getEnv("OPENAI_MODEL", "gpt-4o-mini"),
-		MaxTokens:       maxTokens,
+		TelegramToken:    getEnv("TELEGRAM_BOT_TOKEN", ""),
+		OpenAIAPIKey:     getEnv("OPENAI_API_KEY", ""),
+		OpenAIBaseURL:    getEnv("OPENAI_BASE_URL", "http://31.172.78.152:9000/v1"),
+		DatabasePath:     getEnv("DATABASE_PATH", "./summarybot.db"),
+		Port:             getEnv("PORT", "8080"),
+		BotUsername:      getEnv("BOT_USERNAME", "zagichak_bot"),
+		AllowedChats:     parseInt64List(getEnv("ALLOWED_CHATS", "")),
+		AdminUserIDs:     parseInt64List(getEnv("ADMIN_USER_IDS", "")),
+		RequireApproval:  getEnv("REQUIRE_APPROVAL", "true") == "true",
+		OpenAIModel:      getEnv("OPENAI_MODEL", "gpt-4o-mini"),
+		MaxTokens:        maxTokens,
+		MinMessagesForAI: minMessages,
 	}
 }
 
@@ -163,18 +172,32 @@ func initOpenAI(config *Config) *openai.Client {
 
 func (b *Bot) isChatAllowed(chatID int64) bool {
 	if chatID > 0 {
+		log.Printf("Чат %d разрешен (приватный чат)", chatID)
 		return true
 	}
 
 	for _, allowedID := range b.config.AllowedChats {
 		if allowedID == chatID {
+			log.Printf("Чат %d разрешен (найден в конфиге)", chatID)
 			return true
 		}
 	}
 
 	var count int64
-	b.db.Model(&AllowedChat{}).Where("chat_id = ?", chatID).Count(&count)
-	return count > 0
+	result := b.db.Model(&AllowedChat{}).Where("chat_id = ?", chatID).Count(&count)
+	if result.Error != nil {
+		log.Printf("Ошибка проверки чата %d в БД: %v", chatID, result.Error)
+		return false
+	}
+
+	allowed := count > 0
+	if allowed {
+		log.Printf("Чат %d разрешен (найден в БД)", chatID)
+	} else {
+		log.Printf("Чат %d НЕ разрешен (не найден ни в конфиге, ни в БД)", chatID)
+	}
+
+	return allowed
 }
 
 func (b *Bot) isAdmin(userID int64) bool {
@@ -232,10 +255,12 @@ func (b *Bot) notifyAdminsAboutNewRequest(request ChatApprovalRequest) {
 
 func (b *Bot) saveMessage(m *telebot.Message) {
 	if m.Text == "" {
+		log.Printf("Пропускаем сообщение без текста от %s в чате %d", m.Sender.Username, m.Chat.ID)
 		return
 	}
 
 	if !b.isChatAllowed(m.Chat.ID) {
+		log.Printf("Чат %d не разрешен, сообщение не сохраняется", m.Chat.ID)
 		return
 	}
 
@@ -247,7 +272,13 @@ func (b *Bot) saveMessage(m *telebot.Message) {
 		Timestamp: time.Unix(m.Unixtime, 0),
 	}
 
-	b.db.Create(&message)
+	result := b.db.Create(&message)
+	if result.Error != nil {
+		log.Printf("Ошибка сохранения сообщения в БД: %v", result.Error)
+	} else {
+		log.Printf("Сообщение сохранено: чат %d, пользователь %s, ID записи: %d",
+			m.Chat.ID, m.Sender.Username, message.ID)
+	}
 }
 
 func (b *Bot) getMessagesForPeriod(chatID int64, days int) ([]Message, error) {
@@ -265,8 +296,17 @@ func (b *Bot) getMessagesForPeriod(chatID int64, days int) ([]Message, error) {
 
 func (b *Bot) generateSummary(messages []Message, period string) (string, error) {
 	if len(messages) == 0 {
-		return fmt.Sprintf("За %s не было интересных сообщений 🤷‍♂️", period), nil
+		return fmt.Sprintf("За %s никто ничего не писал, братан 🤷‍♂️", period), nil
 	}
+
+	// Если сообщений мало - не тратим деньги на OpenAI
+	if len(messages) < b.config.MinMessagesForAI {
+		log.Printf("Мало сообщений для AI анализа: %d < %d (порог)", len(messages), b.config.MinMessagesForAI)
+		return fmt.Sprintf("За %s было всего %d сообщений - слишком мало для нормального резюме, братан 📱\n\nПопробуй запросить резюме когда народ побольше пообщается! (нужно минимум %d сообщений)",
+			period, len(messages), b.config.MinMessagesForAI), nil
+	}
+
+	log.Printf("Отправляем %d сообщений в OpenAI для анализа", len(messages))
 
 	var textBuilder strings.Builder
 	for _, msg := range messages {
@@ -274,40 +314,50 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 			msg.Timestamp.Format("15:04"), msg.Username, msg.Text))
 	}
 
-	prompt := fmt.Sprintf(`Проанализируй сообщения из Telegram чата за %s и создай детальное резюме самых интересных моментов на русском языке. 
+	systemPrompt := `Ты крутой пацан с района, который умеет анализировать чатики и делать огненные резюме для корешей. 
+
+ВАЖНО - АНАЛИЗИРУЙ ТОЛЬКО РЕАЛЬНЫЕ СООБЩЕНИЯ:
+- Пересказывай ТОЛЬКО то, что реально было написано в чате
+- НЕ выдумывай события, имена, темы которых не было
+- Если сообщений мало или они скучные - честно говори об этом
+- Точно передавай факты, но своими словами в классном стиле
+
+Твой стиль:
+- Говоришь как настоящий братан - простым языком, с прикольными фразочками
+- Используешь сленг: "братан", "чел", "тема", "движ", "кайф", "жесть" и т.д.
+- Эмодзи ставишь к месту, но не переборщиваешь
+- Пишешь живо и интересно, как будто рассказываешь корешу что было
+- Если что-то скучное - честно говоришь об этом
+
+Что ты делаешь:
+- Выделяешь 3-6 самых интересных тем/событий ИЗ РЕАЛЬНЫХ СООБЩЕНИЙ
+- Группируешь связанные сообщения по темам
+- Сохраняешь важные детали: ссылки, упоминания, решения
+- Используешь HTML теги: <b>жирный</b>, <i>курсив</i>
+- Пишешь 1-2 предложения на тему, коротко и по делу
+
+Формат ответа:
+
+🔥 <b>Что было жарко:</b>
+• [тема с эмодзи] - краткое описание ТОЛЬКО из реальных сообщений
+
+💬 <b>Интересные движи:</b>
+• [движ 1 из реальных сообщений]
+• [движ 2 из реальных сообщений]
+
+🔗 <b>Полезняк:</b> (только если есть ссылки/решения)
+• [ссылка или решение]
+
+Главное - пиши как пацан для пацанов, но строго по фактам из чата!`
+
+	userPrompt := fmt.Sprintf(`Проанализируй ВСЕ сообщения ниже и сделай резюме за %s. 
+
+ВАЖНО: Анализируй ТОЛЬКО эти сообщения, не выдумывай ничего лишнего!
+
+Всего сообщений для анализа: %d
 
 Сообщения:
-%s
-
-Требования к резюме:
-- Выдели 5-8 самых интересных/важных тем, событий или дискуссий
-- Используй подходящие эмодзи для каждой темы
-- Для каждой темы дай 2-3 предложения описания
-- Сохраняй важные детали и контекст
-- Если есть ссылки, упоминания людей или важные решения - обязательно включи
-- Пиши в живом, неформальном стиле как для друзей
-- Если было мало активности или ничего интересного - честно об этом скажи
-- Группируй связанные сообщения по темам
-- Используй HTML теги для выделения: <b>жирный</b>, <i>курсив</i>
-- Для заголовков используй <b>текст</b>
-
-Формат ответа: 
-
-🔥 <b>Горячие темы:</b>
-• [тема 1 с эмодзи] - описание
-• [тема 2 с эмодзи] - описание
-...
-
-💬 <b>Интересные моменты:</b>
-• [момент 1] 
-• [момент 2]
-...
-
-🔗 <b>Важные ссылки/решения:</b> (если есть)
-• [ссылка/решение]
-
-Только основной текст резюме, без дополнительных пояснений.`,
-		period, textBuilder.String(), period)
+%s`, period, len(messages), textBuilder.String())
 
 	resp, err := b.openai.CreateChatCompletion(
 		context.Background(),
@@ -315,12 +365,16 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 			Model: b.config.OpenAIModel,
 			Messages: []openai.ChatCompletionMessage{
 				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: systemPrompt,
+				},
+				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: prompt,
+					Content: userPrompt,
 				},
 			},
 			MaxTokens:   b.config.MaxTokens,
-			Temperature: 0.7,
+			Temperature: 0.3,
 		},
 	)
 
@@ -329,7 +383,7 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 	}
 
 	if len(resp.Choices) == 0 {
-		return "Не удалось создать резюме 😞", nil
+		return "Не смог замутить резюме, братан 😞", nil
 	}
 
 	return resp.Choices[0].Message.Content, nil
@@ -353,10 +407,6 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 		}
 
 		return c.Reply("❌ У меня нет доступа к этому чату.")
-	}
-
-	if !strings.Contains(message.Text, "@"+b.config.BotUsername) {
-		return nil
 	}
 
 	text := strings.ToLower(message.Text)
@@ -387,13 +437,18 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 		}
 	}
 
+	log.Printf("Обрабатываю запрос резюме для чата %d на период: %s (дней назад: %d)", c.Chat().ID, period, days)
+
 	statusMsg, _ := c.Bot().Send(c.Chat(), "Генерирую резюме... ⏳")
 
 	messages, err := b.getMessagesForPeriod(c.Chat().ID, days)
 	if err != nil {
+		log.Printf("Ошибка получения сообщений для чата %d: %v", c.Chat().ID, err)
 		c.Bot().Delete(statusMsg)
 		return c.Reply("Ошибка при получении сообщений 😞")
 	}
+
+	log.Printf("Найдено сообщений для резюме: %d", len(messages))
 
 	summary, err := b.generateSummary(messages, period)
 	if err != nil {
@@ -620,9 +675,16 @@ func main() {
 	tgBot.Handle("/pending", bot.handlePending)
 	tgBot.Handle("/allowed", bot.handleAllowedChats)
 	tgBot.Handle(telebot.OnText, func(c telebot.Context) error {
-		bot.saveMessage(c.Message())
+		message := c.Message()
 
-		if strings.Contains(c.Message().Text, "@"+config.BotUsername) {
+		log.Printf("Получено сообщение от %s (ID: %d) в чате %d (%s): %s",
+			message.Sender.Username, message.Sender.ID,
+			c.Chat().ID, c.Chat().Title, message.Text)
+
+		bot.saveMessage(message)
+
+		if strings.Contains(message.Text, "@"+config.BotUsername) {
+			log.Printf("Обнаружено упоминание бота в сообщении: %s", message.Text)
 			return bot.handleSummaryRequest(c)
 		}
 
