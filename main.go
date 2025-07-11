@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
@@ -68,6 +69,16 @@ type ChatApprovalRequest struct {
 	Username  string
 	Status    string `gorm:"default:'pending'"`
 	CreatedAt time.Time
+}
+
+type SwearStats struct {
+	ID        uint  `gorm:"primaryKey"`
+	ChatID    int64 `gorm:"index"`
+	UserID    int64 `gorm:"index"`
+	Username  string
+	SwearWord string
+	Count     int `gorm:"default:1"`
+	UpdatedAt time.Time
 }
 
 type Bot struct {
@@ -154,7 +165,7 @@ func initDatabase(dbPath string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	err = db.AutoMigrate(&Message{}, &ChatSummary{}, &AllowedChat{}, &ChatApprovalRequest{})
+	err = db.AutoMigrate(&Message{}, &ChatSummary{}, &AllowedChat{}, &ChatApprovalRequest{}, &SwearStats{})
 	if err != nil {
 		return nil, err
 	}
@@ -171,11 +182,6 @@ func initOpenAI(config *Config) *openai.Client {
 }
 
 func (b *Bot) isChatAllowed(chatID int64) bool {
-	if chatID > 0 {
-		log.Printf("Чат %d разрешен (приватный чат)", chatID)
-		return true
-	}
-
 	for _, allowedID := range b.config.AllowedChats {
 		if allowedID == chatID {
 			log.Printf("Чат %d разрешен (найден в конфиге)", chatID)
@@ -279,6 +285,47 @@ func (b *Bot) saveMessage(m *telebot.Message) {
 		log.Printf("Сообщение сохранено: чат %d, пользователь %s, ID записи: %d",
 			m.Chat.ID, m.Sender.Username, message.ID)
 	}
+
+	b.checkAndSaveSwearStats(m)
+}
+
+func (b *Bot) checkAndSaveSwearStats(m *telebot.Message) {
+	if m.Chat.ID > 0 {
+		return
+	}
+
+	swearWords := []string{
+		"блять", "хуй", "пизда", "ебать", "сука", "говно", "дерьмо",
+		"мудак", "долбоеб", "ублюдок", "сволочь", "падла", "гавно",
+		"хрен", "херня", "охуеть", "заебать", "проебать", "наебать",
+	}
+
+	text := strings.ToLower(m.Text)
+	for _, swear := range swearWords {
+		if strings.Contains(text, swear) {
+			var stat SwearStats
+			result := b.db.Where("chat_id = ? AND user_id = ? AND swear_word = ?",
+				m.Chat.ID, m.Sender.ID, swear).First(&stat)
+
+			if result.Error == nil {
+				// Обновляем существующую запись
+				b.db.Model(&stat).Updates(SwearStats{
+					Count:     stat.Count + 1,
+					UpdatedAt: time.Now(),
+				})
+			} else {
+				newStat := SwearStats{
+					ChatID:    m.Chat.ID,
+					UserID:    m.Sender.ID,
+					Username:  m.Sender.Username,
+					SwearWord: swear,
+					Count:     1,
+					UpdatedAt: time.Now(),
+				}
+				b.db.Create(&newStat)
+			}
+		}
+	}
 }
 
 func (b *Bot) getMessagesForPeriod(chatID int64, days int) ([]Message, error) {
@@ -299,7 +346,6 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 		return fmt.Sprintf("За %s никто ничего не писал, братан 🤷‍♂️", period), nil
 	}
 
-	// Если сообщений мало - не тратим деньги на OpenAI
 	if len(messages) < b.config.MinMessagesForAI {
 		log.Printf("Мало сообщений для AI анализа: %d < %d (порог)", len(messages), b.config.MinMessagesForAI)
 		return fmt.Sprintf("За %s было всего %d сообщений - слишком мало для нормального резюме, братан 📱\n\nПопробуй запросить резюме когда народ побольше пообщается! (нужно минимум %d сообщений)",
@@ -392,6 +438,10 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 	message := c.Message()
 
+	if c.Chat().ID > 0 {
+		return c.Reply("❌ Summary доступен только в групповых чатах, братан! 🤖")
+	}
+
 	if !b.isChatAllowed(c.Chat().ID) {
 		if b.config.RequireApproval && c.Chat().ID < 0 {
 			chatTitle := c.Chat().Title
@@ -475,7 +525,28 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 }
 
 func (b *Bot) handleStart(c telebot.Context) error {
-	if c.Chat().ID < 0 && !b.isChatAllowed(c.Chat().ID) {
+	if c.Chat().ID > 0 {
+		if b.isAdmin(c.Sender().ID) {
+			welcomeText := `Привет, админ! 👑
+
+Доступные команды:
+• /approve <chat_id> - одобрить чат
+• /reject <chat_id> - отклонить запрос
+• /pending - показать ожидающие запросы
+• /allowed - список разрешенных чатов
+
+В групповых чатах также доступны:
+• /roast_random - жесткий подкол случайному корешу 🔥
+• /reminder_random - "важное" напоминание кому-то 😏
+
+Summary доступен только в групповых чатах! 🤖`
+			return c.Reply(welcomeText)
+		} else {
+			return c.Reply("👋 Привет! Этот бот работает только в групповых чатах. Добавь меня в группу и попроси резюме!")
+		}
+	}
+
+	if !b.isChatAllowed(c.Chat().ID) {
 		if b.config.RequireApproval {
 			chatTitle := c.Chat().Title
 			if chatTitle == "" {
@@ -500,9 +571,352 @@ func (b *Bot) handleStart(c telebot.Context) error {
 • @zagichak_bot что было за позавчера
 • @zagichak_bot что было за 3 дня
 
+Также попробуй:
+• /roast_random - жесткий подкол случайному корешу 🔥
+• /reminder_random - "важное" напоминание кому-то 😏
+• /top_mat - топ матершинников чата 🤬
+
 Я проанализирую сообщения и выдам самое интересное! 🤖✨`
 
 	return c.Reply(welcomeText)
+}
+
+func (b *Bot) handleUserJoined(c telebot.Context) error {
+	// Работает только в групповых чатах
+	if c.Chat().ID > 0 || !b.isChatAllowed(c.Chat().ID) {
+		return nil
+	}
+
+	for _, user := range c.Message().UsersJoined {
+		if user.IsBot {
+			continue // Пропускаем ботов
+		}
+
+		username := user.Username
+		if username == "" {
+			username = user.FirstName
+		}
+
+		greetings := []string{
+			"О, привет %s! 👋 Хуй сосал? Расскажи о себе, не стесняйся! 😏",
+			"Смотрите кто к нам заглянул! 👀 %s, надеюсь не из полиции? 🚔",
+			"Ебааа, %s в здании! 🎉 Сразу видно - человек с хорошим вкусом 😎",
+			"%s подтянулся! 💪 Братан, тут весело, оставайся! 🔥",
+			"О боже, %s! 😱 Ты случайно не тот самый легендарный парень? 🌟",
+			"Здарова %s! 🤘 Мамке не говори что тут сидишь, ладно? 🤫",
+			"Вау, %s! 🎪 Цирк потерял клоуна или ты просто в гости? 🤡",
+			"%s на связи! 📡 Надеюсь у тебя крепкие нервы, тут отрываемся по полной! 🎭",
+			"Глянь-ка, %s объявился! 👁️ Сразу видно - интеллигент блядь! 🎩",
+			"Эй %s! 🗣️ Водка есть? Нет? Ну тогда просто посиди, пообщайся! 🍻",
+			"О май гад, %s! 😲 Ты специально к нам или GPS обосрался? 🗺️",
+			"%s в чате! 🎊 Давай знакомиться, расскажи что по жизни делаешь! 💼",
+			"Вот это да, %s! 🎯 Точно не перепутал чат? Мы тут дичь творим! 🦌",
+			"Добро пожаловать %s! 🏠 Тапки снял? Проходи, располагайся! 👟",
+			"Ого, %s подъехал! 🚗 Бензин кончился или просто скучно стало? ⛽",
+		}
+
+		randomIndex := rand.Intn(len(greetings))
+		greeting := fmt.Sprintf(greetings[randomIndex], escapeHTML(username))
+
+		c.Reply(greeting, &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
+	}
+
+	return nil
+}
+
+func (b *Bot) generateRoastForUser(username string, chatID int64) (string, error) {
+	systemPrompt := `Ты злобный пацан с района, который делает максимально жесткие, но дружеские подколы. 
+
+Твоя задача - сделать ЖЕСТКИЙ, но не переходящий границы подкол конкретному человеку в дружеском чате.
+
+ВАЖНО:
+- Подкол должен быть МАКСИМАЛЬНО ЖЕСТКИМ, но не оскорбительным
+- Это дружеский чат, все свои - можно себе позволить больше
+- Используй креативные, остроумные подъебки
+- Никаких серьезных оскорблений, только веселая жесть
+- Используй эмодзи, сленг, юмор
+- Длина: 1-2 предложения максимум
+- Можешь пошутить над внешностью, поведением, привычками (в рамках дружеского троллинга)
+
+Стиль:
+- Говори как пацан с улицы
+- Используй слова: "братан", "чел", "кореш", "лох", "жесть" и т.д.
+- Можно слегка матерный юмор в рамках приличия
+- Острый, саркастичный, но дружелюбный тон
+
+Формат ответа: просто жесткий подкол без лишних слов.`
+
+	userPrompt := fmt.Sprintf(`Сделай максимально жесткий, но дружеский подкол пользователю с ником "%s". 
+Это дружеский чат, все корешы, можно жестко тролить!`, username)
+
+	resp, err := b.openai.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: b.config.OpenAIModel,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: systemPrompt,
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: userPrompt,
+				},
+			},
+			MaxTokens:   200,
+			Temperature: 0.8,
+		},
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("ошибка OpenAI API: %v", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "Даже я не знаю как тебя подколоть, братан 😂", nil
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
+func (b *Bot) generateRandomReminder(username string) (string, error) {
+	systemPrompt := `Ты заботливый, но жесткий кореш, который "напоминает" людям о разной фигне.
+
+Твоя задача - придумать смешное "напоминание" которое на самом деле просто жесткий прикол.
+
+ВАЖНО:
+- Это НЕ реальное напоминание, а просто повод подколоть человека
+- Выдумывай абсурдные, смешные "обязанности" и "дела"
+- Будь максимально креативным и жестким
+- Используй дружеский, но наглый тон
+- Можно упоминать: работу, быт, отношения, хобби, привычки
+- Длина: 1-2 предложения
+
+Примеры стиля:
+"Эй {username}, ты забыл покормить свою депрессию!"
+"Напоминаю {username}: пора менять носки, соседи жалуются!"
+"Кореш {username}, твоя очередь выносить мусор из головы!"
+
+Стиль:
+- Говори как пацан
+- Используй слова: "братан", "кореш", "чел" и т.д.
+- Жесткий юмор в рамках дружбы
+- Абсурдные "напоминания"
+
+Формат: "Эй [username], [жесткое напоминание-прикол]"`
+
+	userPrompt := fmt.Sprintf(`Придумай жесткое "напоминание"-прикол для пользователя "%s". 
+Это должно быть смешно и абсурдно!`, username)
+
+	resp, err := b.openai.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: b.config.OpenAIModel,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: systemPrompt,
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: userPrompt,
+				},
+			},
+			MaxTokens:   150,
+			Temperature: 0.9,
+		},
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("ошибка OpenAI API: %v", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		fallbackReminders := []string{
+			"Эй %s, ты забыл покормить свою лень! 😴",
+			"Напоминаю %s: пора менять носки, даже я чувствую! 🧦",
+			"Кореш %s, твоя очередь выносить мусор из головы! 🗑️",
+			"Братан %s, ты обещал стать человеком, когда уже? 🤔",
+			"Эй %s, мамка просила передать - убери в комнате! 🏠",
+		}
+		randomIndex := rand.Intn(len(fallbackReminders))
+		return fmt.Sprintf(fallbackReminders[randomIndex], username), nil
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
+func (b *Bot) getRandomActiveUser(chatID int64) (string, int64, error) {
+	var users []struct {
+		Username string
+		UserID   int64
+		Count    int64
+	}
+
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7)
+
+	err := b.db.Raw(`
+		SELECT username, user_id, COUNT(*) as count 
+		FROM messages 
+		WHERE chat_id = ? AND timestamp >= ? AND username != '' 
+		GROUP BY user_id, username 
+		HAVING count >= 3
+		ORDER BY count DESC 
+		LIMIT 20
+	`, chatID, sevenDaysAgo).Scan(&users)
+
+	if err != nil || len(users) == 0 {
+		return "", 0, fmt.Errorf("нет активных пользователей")
+	}
+
+	randomIndex := rand.Intn(len(users))
+	selectedUser := users[randomIndex]
+
+	return selectedUser.Username, selectedUser.UserID, nil
+}
+
+func (b *Bot) handleRoastUser(c telebot.Context) error {
+	if c.Chat().ID > 0 || !b.isChatAllowed(c.Chat().ID) {
+		return c.Reply("❌ Подколы только в групповых чатах!")
+	}
+
+	username, _, err := b.getRandomActiveUser(c.Chat().ID)
+	if err != nil {
+		return c.Reply("😔 Не могу найти кого подколоть - все молчат!")
+	}
+
+	roast, err := b.generateRoastForUser(username, c.Chat().ID)
+	if err != nil {
+		log.Printf("Ошибка генерации подкола: %v", err)
+		return c.Reply("Сломался генератор подколов 🤖💥")
+	}
+
+	return c.Reply("🔥 <b>Случайный подкол:</b>\n\n"+roast, &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
+}
+
+func (b *Bot) handleReminder(c telebot.Context) error {
+	if c.Chat().ID > 0 || !b.isChatAllowed(c.Chat().ID) {
+		return c.Reply("❌ Напоминания только в групповых чатах!")
+	}
+
+	username, _, err := b.getRandomActiveUser(c.Chat().ID)
+	if err != nil {
+		return c.Reply("😔 Некому напоминать - все исчезли!")
+	}
+
+	reminder, err := b.generateRandomReminder(username)
+	if err != nil {
+		log.Printf("Ошибка генерации напоминания: %v", err)
+		return c.Reply("Забыл что хотел напомнить 🤪")
+	}
+
+	return c.Reply("⏰ <b>Важное напоминание:</b>\n\n"+reminder, &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
+}
+
+func (b *Bot) maybeDoRandomAction(c telebot.Context) {
+	if c.Chat().ID > 0 || !b.isChatAllowed(c.Chat().ID) {
+		return
+	}
+
+	if rand.Intn(100) != 0 {
+		return
+	}
+
+	sevenDaysAgo := time.Now().AddDate(0, 0, -7)
+	var userCount int64
+	b.db.Raw(`
+		SELECT COUNT(DISTINCT user_id) 
+		FROM messages 
+		WHERE chat_id = ? AND timestamp >= ?
+	`, c.Chat().ID, sevenDaysAgo).Scan(&userCount)
+
+	if userCount < 3 {
+		return
+	}
+
+	actionType := rand.Intn(2)
+
+	username, _, err := b.getRandomActiveUser(c.Chat().ID)
+	if err != nil {
+		return
+	}
+
+	if actionType == 0 {
+		roast, err := b.generateRoastForUser(username, c.Chat().ID)
+		if err != nil {
+			return
+		}
+
+		message := "🎯 <b>Внезапный подкол:</b>\n\n" + roast
+		c.Bot().Send(c.Chat(), message, &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
+
+		log.Printf("Автоматический подкол для %s в чате %d", username, c.Chat().ID)
+	} else {
+		reminder, err := b.generateRandomReminder(username)
+		if err != nil {
+			return
+		}
+
+		message := "🔔 <b>Срочное напоминание:</b>\n\n" + reminder
+		c.Bot().Send(c.Chat(), message, &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
+
+		log.Printf("Автоматическое напоминание для %s в чате %d", username, c.Chat().ID)
+	}
+}
+func (b *Bot) handleTopMat(c telebot.Context) error {
+	if c.Chat().ID > 0 || !b.isChatAllowed(c.Chat().ID) {
+		return c.Reply("❌ Статистика мата только в групповых чатах!")
+	}
+
+	var stats []struct {
+		Username string
+		Total    int
+	}
+
+	b.db.Raw(`
+		SELECT username, SUM(count) as total 
+		FROM swear_stats 
+		WHERE chat_id = ? 
+		GROUP BY user_id, username 
+		ORDER BY total DESC 
+		LIMIT 10
+	`, c.Chat().ID).Scan(&stats)
+
+	if len(stats) == 0 {
+		return c.Reply("🤯 Невероятно! В этом чате еще никто не матерился! 😇\n\nИли я просто еще не успел все посчитать... 🤔")
+	}
+
+	var response strings.Builder
+	response.WriteString("🤬 <b>Топ матершинников чата:</b>\n\n")
+
+	medals := []string{"🥇", "🥈", "🥉"}
+	for i, stat := range stats {
+		var medal string
+		if i < 3 {
+			medal = medals[i]
+		} else {
+			medal = fmt.Sprintf("%d.", i+1)
+		}
+
+		response.WriteString(fmt.Sprintf("%s <b>%s</b> - %d раз\n",
+			medal, escapeHTML(stat.Username), stat.Total))
+	}
+
+	response.WriteString("\n<i>Статистика ведется с момента последнего обновления бота 📊</i>")
+
+	return c.Reply(response.String(), &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
 }
 
 func (b *Bot) handleRoast(c telebot.Context) error {
@@ -513,7 +927,7 @@ func (b *Bot) handleRoast(c telebot.Context) error {
 	if strings.Contains(text, "сосал") || strings.Contains(text, "соси") {
 		roastResponses = []string{
 			"Ой, какой смешной 😂 Иди лучше мамке помоги посуду помыть",
-			"Вау, какой оригинальный юмор! 🥱 Года в 2005 может и засмеялись бы",
+			"Вау, какая оригинальность! 🥱 Года в 2005 может и засмеялись бы",
 			"Серьезно? Это лучшее что ты смог придумать? 😂 Слабовато, чел",
 			"Какой же ты клоун 🤪 Ладно, развеселил немного",
 			"Ты серьезно думал что это смешно? 💀 Лучше б молчал, братан",
@@ -586,7 +1000,7 @@ func (b *Bot) handleRoast(c telebot.Context) error {
 			"Комик доморощенный 😴 Иди лучше что-то полезное делай",
 			"Хахаха, очень смешно... НЕТ 🙄 Попробуй еще раз, может получится",
 			"О, у нас тут комедиант! 🎭 Только шутки твои как анекдоты от дедушки",
-			"Ты случаем не из КВН сбежал? 😏 Такой же уровень юмора",
+			"Ты случайно не из КВН сбежал? 😏 Такой же уровень юмора",
 			"Какая оригинальность! 🎨 Небось всю ночь придумывал",
 			"Мам, смотри, я умею матюкаться! 👶 Вырастешь - поймешь как глупо это выглядит",
 			"Ого, какая креативность! 🌟 Нобелевскую премию дают за такое?",
@@ -610,7 +1024,7 @@ func (b *Bot) handleRoast(c telebot.Context) error {
 		}
 	}
 
-	randomIndex := int(time.Now().UnixNano()) % len(roastResponses)
+	randomIndex := rand.Intn(len(roastResponses))
 	response := roastResponses[randomIndex]
 
 	log.Printf("Отвечаем умнику %s в чате %d", c.Sender().Username, c.Chat().ID)
@@ -624,37 +1038,11 @@ func (b *Bot) isRoastMessage(text string) bool {
 	cleanText = strings.TrimSpace(cleanText)
 
 	roastTriggers := []string{
-		"сосал",
-		"сосешь",
-		"соси",
-		"пидор",
-		"гей",
-		"лох",
-		"дурак",
-		"идиот",
-		"тупой",
-		"долбоеб",
-		"мудак",
-		"ебан",
-		"дебил",
-		"придурок",
-		"кретин",
-		"козел",
-		"свинья",
-		"урод",
-		"падла",
-		"говно",
-		"хуй",
-		"пизда",
-		"ебать",
-		"блять",
-		"сука",
-		"шлюха",
-		"кретин",
-		"дебил",
-		"обоссался",
-		"обосрался",
-		"ублюдок",
+		"сосал", "сосешь", "соси", "пидор", "гей", "лох",
+		"дурак", "идиот", "тупой", "долбоеб", "мудак", "ебан",
+		"дебил", "придурок", "кретин", "козел", "свинья", "урод",
+		"падла", "говно", "хуй", "пизда", "ебать", "блять",
+		"сука", "шлюха", "обоссался", "обосрался", "ублюдок",
 	}
 
 	for _, trigger := range roastTriggers {
@@ -666,13 +1054,7 @@ func (b *Bot) isRoastMessage(text string) bool {
 
 	if len(cleanText) <= 15 && (strings.Contains(cleanText, "?") || strings.Contains(cleanText, "???")) {
 		provocativePatterns := []string{
-			"как дела",
-			"че как",
-			"живой",
-			"работаешь",
-			"спишь",
-			"ку",
-			"привет",
+			"как дела", "че как", "живой", "работаешь", "спишь", "ку", "привет",
 		}
 
 		for _, pattern := range provocativePatterns {
@@ -828,6 +1210,8 @@ func (b *Bot) startHealthServer() {
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	config := loadConfig()
 
 	db, err := initDatabase(config.DatabasePath)
@@ -859,6 +1243,11 @@ func main() {
 	tgBot.Handle("/reject", bot.handleReject)
 	tgBot.Handle("/pending", bot.handlePending)
 	tgBot.Handle("/allowed", bot.handleAllowedChats)
+	tgBot.Handle("/roast_random", bot.handleRoastUser)
+	tgBot.Handle("/reminder_random", bot.handleReminder)
+	tgBot.Handle("/top_mat", bot.handleTopMat)
+	tgBot.Handle(telebot.OnUserJoined, bot.handleUserJoined)
+
 	tgBot.Handle(telebot.OnText, func(c telebot.Context) error {
 		message := c.Message()
 
@@ -867,6 +1256,7 @@ func main() {
 			c.Chat().ID, c.Chat().Title, message.Text)
 
 		bot.saveMessage(message)
+		go bot.maybeDoRandomAction(c)
 
 		if strings.Contains(message.Text, "@"+config.BotUsername) {
 			log.Printf("Обнаружено упоминание бота в сообщении: %s", message.Text)
@@ -882,6 +1272,7 @@ func main() {
 
 		return nil
 	})
+
 	tgBot.Handle("/debug", func(c telebot.Context) error {
 		if !bot.isAdmin(c.Sender().ID) {
 			return c.Reply("❌ Только для админов")
