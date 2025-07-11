@@ -1269,9 +1269,7 @@ func (b *Bot) isSummaryRequest(text string) bool {
 
 	summaryTriggers := []string{
 		"что было", "что происходило", "резюме", "саммари", "summary",
-		"сегодня", "вчера", "позавчера",
-		"дн", "день", "дня", "дней",
-	}
+		"сегодня", "вчера", "позавчера"}
 
 	for _, trigger := range summaryTriggers {
 		if strings.Contains(cleanText, trigger) {
