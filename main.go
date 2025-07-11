@@ -106,6 +106,15 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func escapeHTML(text string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+	)
+	return replacer.Replace(text)
+}
+
 func parseInt64List(str string) []int64 {
 	if str == "" {
 		return []int64{}
@@ -202,20 +211,22 @@ func (b *Bot) notifyAdminsAboutNewRequest(request ChatApprovalRequest) {
 		return
 	}
 
-	message := fmt.Sprintf("🔐 Новый запрос доступа\n\n"+
-		"Чат: %s (%d)\n"+
-		"Пользователь: @%s (%d)\n\n"+
+	message := fmt.Sprintf("🔐 <b>Новый запрос доступа</b>\n\n"+
+		"<b>Чат:</b> %s (%d)\n"+
+		"<b>Пользователь:</b> @%s (%d)\n\n"+
 		"Используйте команды:\n"+
-		"• /approve %d - разрешить\n"+
-		"• /reject %d - отклонить\n"+
-		"• /pending - показать все запросы",
-		request.ChatTitle, request.ChatID,
-		request.Username, request.UserID,
+		"• <code>/approve %d</code> - разрешить\n"+
+		"• <code>/reject %d</code> - отклонить\n"+
+		"• <code>/pending</code> - показать все запросы",
+		escapeHTML(request.ChatTitle), request.ChatID,
+		escapeHTML(request.Username), request.UserID,
 		request.ChatID, request.ChatID)
 
 	for _, adminID := range b.config.AdminUserIDs {
 		chat := &telebot.Chat{ID: adminID}
-		b.telebot.Send(chat, message)
+		b.telebot.Send(chat, message, &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
 	}
 }
 
@@ -277,22 +288,22 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 - Пиши в живом, неформальном стиле как для друзей
 - Если было мало активности или ничего интересного - честно об этом скажи
 - Группируй связанные сообщения по темам
-- НЕ используй звездочки (*), подчеркивания (_), квадратные скобки для выделения текста
-- Используй только эмодзи и обычный текст без специальных символов форматирования
+- Используй HTML теги для выделения: <b>жирный</b>, <i>курсив</i>
+- Для заголовков используй <b>текст</b>
 
 Формат ответа: 
 
-🔥 Горячие темы:
+🔥 <b>Горячие темы:</b>
 • [тема 1 с эмодзи] - описание
 • [тема 2 с эмодзи] - описание
 ...
 
-💬 Интересные моменты:
+💬 <b>Интересные моменты:</b>
 • [момент 1] 
 • [момент 2]
 ...
 
-🔗 Важные ссылки/решения: (если есть)
+🔗 <b>Важные ссылки/решения:</b> (если есть)
 • [ссылка/решение]
 
 Только основной текст резюме, без дополнительных пояснений.`,
@@ -309,7 +320,7 @@ func (b *Bot) generateSummary(messages []Message, period string) (string, error)
 				},
 			},
 			MaxTokens:   b.config.MaxTokens,
-			Temperature: 0.2,
+			Temperature: 0.7,
 		},
 	)
 
@@ -400,10 +411,12 @@ func (b *Bot) handleSummaryRequest(c telebot.Context) error {
 
 	c.Bot().Delete(statusMsg)
 
-	summaryText := fmt.Sprintf("📋 Резюме за %s\n\n%s\n\n_Проанализировано сообщений: %d_",
+	summaryText := fmt.Sprintf("📋 <b>Резюме за %s</b>\n\n%s\n\n<i>Проанализировано сообщений: %d</i>",
 		period, summary, len(messages))
 
-	return c.Reply(summaryText)
+	return c.Reply(summaryText, &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
 }
 
 func (b *Bot) handleStart(c telebot.Context) error {
@@ -444,7 +457,9 @@ func (b *Bot) handleApprove(c telebot.Context) error {
 
 	args := strings.Fields(c.Message().Text)
 	if len(args) < 2 {
-		return c.Reply("📝 Использование: `/approve <chat_id>`")
+		return c.Reply("📝 Использование: <code>/approve &lt;chat_id&gt;</code>", &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
 	}
 
 	chatID, err := strconv.ParseInt(args[1], 10, 64)
@@ -482,7 +497,9 @@ func (b *Bot) handleReject(c telebot.Context) error {
 
 	args := strings.Fields(c.Message().Text)
 	if len(args) < 2 {
-		return c.Reply("📝 Использование: `/reject <chat_id>`")
+		return c.Reply("📝 Использование: <code>/reject &lt;chat_id&gt;</code>", &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
 	}
 
 	chatID, err := strconv.ParseInt(args[1], 10, 64)
@@ -514,16 +531,18 @@ func (b *Bot) handlePending(c telebot.Context) error {
 	}
 
 	var response strings.Builder
-	response.WriteString("📋 Ожидающие запросы:\n\n")
+	response.WriteString("📋 <b>Ожидающие запросы:</b>\n\n")
 
 	for _, req := range requests {
-		response.WriteString(fmt.Sprintf("🔹 %s (%d)\n", req.ChatTitle, req.ChatID))
-		response.WriteString(fmt.Sprintf("   👤 @%s (%d)\n", req.Username, req.UserID))
+		response.WriteString(fmt.Sprintf("🔹 <b>%s</b> (%d)\n", escapeHTML(req.ChatTitle), req.ChatID))
+		response.WriteString(fmt.Sprintf("   👤 @%s (%d)\n", escapeHTML(req.Username), req.UserID))
 		response.WriteString(fmt.Sprintf("   📅 %s\n", req.CreatedAt.Format("02.01.2006 15:04")))
-		response.WriteString(fmt.Sprintf("   • /approve %d /reject %d\n\n", req.ChatID, req.ChatID))
+		response.WriteString(fmt.Sprintf("   • <code>/approve %d</code> <code>/reject %d</code>\n\n", req.ChatID, req.ChatID))
 	}
 
-	return c.Reply(response.String())
+	return c.Reply(response.String(), &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
 }
 
 func (b *Bot) handleAllowedChats(c telebot.Context) error {
@@ -535,14 +554,14 @@ func (b *Bot) handleAllowedChats(c telebot.Context) error {
 	b.db.Order("created_at DESC").Find(&chats)
 
 	var response strings.Builder
-	response.WriteString("📋 Разрешенные чаты:\n\n")
+	response.WriteString("📋 <b>Разрешенные чаты:</b>\n\n")
 
 	for _, chatID := range b.config.AllowedChats {
-		response.WriteString(fmt.Sprintf("🔹 %d (из конфига)\n", chatID))
+		response.WriteString(fmt.Sprintf("🔹 %d <i>(из конфига)</i>\n", chatID))
 	}
 
 	for _, chat := range chats {
-		response.WriteString(fmt.Sprintf("🔹 %s (%d)\n", chat.ChatTitle, chat.ChatID))
+		response.WriteString(fmt.Sprintf("🔹 <b>%s</b> (%d)\n", escapeHTML(chat.ChatTitle), chat.ChatID))
 		response.WriteString(fmt.Sprintf("   📅 %s\n\n", chat.CreatedAt.Format("02.01.2006 15:04")))
 	}
 
@@ -550,7 +569,9 @@ func (b *Bot) handleAllowedChats(c telebot.Context) error {
 		response.WriteString("📭 Нет разрешенных чатов.")
 	}
 
-	return c.Reply(response.String())
+	return c.Reply(response.String(), &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
 }
 
 func (b *Bot) startHealthServer() {
@@ -601,7 +622,6 @@ func main() {
 	tgBot.Handle(telebot.OnText, func(c telebot.Context) error {
 		bot.saveMessage(c.Message())
 
-		// Проверяем, есть ли упоминание бота
 		if strings.Contains(c.Message().Text, "@"+config.BotUsername) {
 			return bot.handleSummaryRequest(c)
 		}
