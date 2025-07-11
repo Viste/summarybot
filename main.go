@@ -847,7 +847,9 @@ func (b *Bot) handleRoastUser(c telebot.Context) error {
 		return c.Reply("Сломался генератор подколов 🤖💥")
 	}
 
-	return c.Reply(roast, &telebot.SendOptions{
+	taggedRoast := fmt.Sprintf("@%s %s", username, roast)
+
+	return c.Reply(taggedRoast, &telebot.SendOptions{
 		ParseMode: telebot.ModeHTML,
 	})
 }
@@ -874,7 +876,9 @@ func (b *Bot) handleReminder(c telebot.Context) error {
 		return c.Reply("Забыл что хотел напомнить 🤪")
 	}
 
-	return c.Reply("⏰ <b>Важное напоминание:</b>\n\n"+reminder, &telebot.SendOptions{
+	taggedReminder := fmt.Sprintf("⏰ <b>Важное напоминание:</b>\n\n@%s %s", username, reminder)
+
+	return c.Reply(taggedReminder, &telebot.SendOptions{
 		ParseMode: telebot.ModeHTML,
 	})
 }
@@ -913,7 +917,7 @@ func (b *Bot) maybeDoRandomAction(c telebot.Context) {
 			return
 		}
 
-		message := "🎯 <b>Внезапный подкол:</b>\n\n" + roast
+		message := fmt.Sprintf("@%s %s", username, roast)
 		c.Bot().Send(c.Chat(), message, &telebot.SendOptions{
 			ParseMode: telebot.ModeHTML,
 		})
@@ -925,7 +929,7 @@ func (b *Bot) maybeDoRandomAction(c telebot.Context) {
 			return
 		}
 
-		message := "🔔 <b>Срочное напоминание:</b>\n\n" + reminder
+		message := fmt.Sprintf("🔔 <b>Срочное напоминание:</b>\n\n@%s %s", username, reminder)
 		c.Bot().Send(c.Chat(), message, &telebot.SendOptions{
 			ParseMode: telebot.ModeHTML,
 		})
