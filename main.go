@@ -81,6 +81,23 @@ type SwearStats struct {
 	UpdatedAt time.Time
 }
 
+// Новая структура для хранения контекста диалогов
+type DialogContext struct {
+	ID            uint   `gorm:"primaryKey"`
+	ChatID        int64  `gorm:"index"`
+	UserID        int64  `gorm:"index"`
+	ThreadID      string `gorm:"index"`
+	BotMessageID  int
+	UserMessageID int
+	UserMessage   string `gorm:"type:text"`
+	BotResponse   string `gorm:"type:text"`
+	UserGender    string
+	UserFirstName string
+	MessageOrder  int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type Bot struct {
 	telebot *telebot.Bot
 	db      *gorm.DB
@@ -165,7 +182,7 @@ func initDatabase(dbPath string) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	err = db.AutoMigrate(&Message{}, &ChatSummary{}, &AllowedChat{}, &ChatApprovalRequest{}, &SwearStats{})
+	err = db.AutoMigrate(&Message{}, &ChatSummary{}, &AllowedChat{}, &ChatApprovalRequest{}, &SwearStats{}, &DialogContext{})
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +196,130 @@ func initOpenAI(config *Config) *openai.Client {
 		clientConfig.BaseURL = config.OpenAIBaseURL
 	}
 	return openai.NewClientWithConfig(clientConfig)
+}
+
+func (b *Bot) determineGender(firstName string) string {
+	if firstName == "" {
+		return "unknown"
+	}
+
+	systemPrompt := `Ты эксперт по определению пола людей по их именам. 
+
+Твоя задача - определить пол человека по имени с учетом разных культур и языков.
+
+ВАЖНО:
+- Отвечай ТОЛЬКО одним словом: "male", "female" или "unknown"
+- Учитывай русские, английские, европейские имена
+- Если имя нейтральное или незнакомое - отвечай "unknown"
+- НЕ объясняй и НЕ добавляй ничего лишнего
+
+Примеры:
+Александр -> male
+Анна -> female  
+Михаил -> male
+Елена -> female
+Alex -> unknown (может быть и мужским и женским)
+Sam -> unknown`
+
+	userPrompt := fmt.Sprintf("Определи пол для имени: %s", firstName)
+
+	resp, err := b.openai.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: b.config.OpenAIModel,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: systemPrompt,
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: userPrompt,
+				},
+			},
+			MaxTokens:   10,
+			Temperature: 0.1,
+		},
+	)
+
+	if err != nil {
+		log.Printf("Ошибка определения пола для имени %s: %v", firstName, err)
+		return "unknown"
+	}
+
+	if len(resp.Choices) == 0 {
+		return "unknown"
+	}
+
+	gender := strings.ToLower(strings.TrimSpace(resp.Choices[0].Message.Content))
+	if gender == "male" || gender == "female" {
+		return gender
+	}
+
+	return "unknown"
+}
+
+func generateThreadID(chatID int64, userID int64, timestamp time.Time) string {
+	return fmt.Sprintf("%d_%d_%d", chatID, userID, timestamp.Unix())
+}
+
+func (b *Bot) saveDialogContext(chatID, userID int64, userFirstName, userMessage, botResponse string, botMessageID, userMessageID int, threadID string, messageOrder int) {
+	gender := b.determineGender(userFirstName)
+
+	log.Printf("Определен пол для %s: %s", userFirstName, gender)
+
+	context := DialogContext{
+		ChatID:        chatID,
+		UserID:        userID,
+		ThreadID:      threadID,
+		BotMessageID:  botMessageID,
+		UserMessageID: userMessageID,
+		UserMessage:   userMessage,
+		BotResponse:   botResponse,
+		UserGender:    gender,
+		UserFirstName: userFirstName,
+		MessageOrder:  messageOrder,
+	}
+
+	result := b.db.Create(&context)
+	if result.Error != nil {
+		log.Printf("Ошибка сохранения контекста диалога: %v", result.Error)
+	} else {
+		log.Printf("Сохранен контекст диалога: thread %s, порядок %d", threadID, messageOrder)
+	}
+}
+
+func (b *Bot) getDialogHistory(threadID string, limit int) ([]DialogContext, error) {
+	var contexts []DialogContext
+	err := b.db.Where("thread_id = ?", threadID).
+		Order("message_order ASC").
+		Limit(limit).
+		Find(&contexts).Error
+
+	return contexts, err
+}
+
+func (b *Bot) isBotReply(c telebot.Context) (bool, string) {
+	message := c.Message()
+
+	if message.ReplyTo == nil {
+		return false, ""
+	}
+
+	if message.ReplyTo.Sender.Username != b.config.BotUsername {
+		return false, ""
+	}
+
+	var context DialogContext
+	err := b.db.Where("chat_id = ? AND bot_message_id = ?",
+		c.Chat().ID, message.ReplyTo.ID).
+		First(&context).Error
+
+	if err != nil {
+		return false, ""
+	}
+
+	return true, context.ThreadID
 }
 
 func (b *Bot) isChatAllowed(chatID int64) bool {
@@ -578,6 +719,7 @@ Summary доступен только в групповых чатах! 🤖`
 <b>Основные команды:</b>
 • @zagichak_bot что было за сегодня - резюме
 • @zagichak_bot привет - просто поболтать
+• Отвечай на мои сообщения - будем диалог вести! 💬
 • /roast_random - подкол случайному корешу 🔥
 • /reminder_random - напоминание кому-то 😏
 • /top_mat - топ матершинников 🤬
@@ -984,59 +1126,83 @@ func (b *Bot) handleTopMat(c telebot.Context) error {
 	})
 }
 
-func (b *Bot) generateSmartResponse(originalMessage string, username string, isProvocation bool) (string, error) {
+// Новая функция для генерации ответов с учетом контекста диалога
+func (b *Bot) generateSmartResponseWithContext(originalMessage string, username string, userGender string, dialogHistory []DialogContext, isProvocation bool) (string, error) {
 	var systemPrompt string
 
+	var contextText string
+	if len(dialogHistory) > 0 {
+		contextText = "\n\nИСТОРИЯ ДИАЛОГА:\n"
+		for _, ctx := range dialogHistory {
+			contextText += fmt.Sprintf("Пользователь: %s\nТы: %s\n\n", ctx.UserMessage, ctx.BotResponse)
+		}
+	}
+
+	// Определяем обращение по полу
+	genderAddress := ""
+	switch userGender {
+	case "male":
+		genderAddress = "братан"
+	case "female":
+		genderAddress = "подруга"
+	default:
+		genderAddress = "дружище"
+	}
+
 	if isProvocation {
-		systemPrompt = `Ты злобный пацан с района, который отвечает на провокации в дружеском чате.
+		systemPrompt = fmt.Sprintf(`Ты злобный пацан с района по имени Загичак, который отвечает на провокации в дружеском чате.
 
 Твоя задача - ответить на провокацию ЖЕСТКО, но дружелюбно. Это друзья троллят друг друга.
 
-СТИЛЬ ОТВЕТОВ (используй как примеры):
+ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:
+- Имя: %s
+- Пол: %s
+- Обращайся: %s
+
+%s
+
+СТИЛЬ ОТВЕТОВ:
 - "Ой, какой смешной 😂 Иди лучше мамке помоги посуду помыть"
-- "Вау, какая оригинальность! 🥱 Года в 2005 может и засмеялись бы"
+- "Вау, какая оригинальность! 🥱 Года в 2005 может и засмеялись бы" 
 - "Какой же ты клоун 🤪 Ладно, развеселил немного"
-- "Зеркало дома сломалось? 🪞 Может починишь сначала его"
 - "Проекция называется 📽️ Изучи этот термин"
-- "2007 год на связи 📞 Хочет свои шутки обратно"
-- "Тебе лет сколько, 12? 👶 Подрасти сначала"
 
 Общие принципы:
 - Говори как братан с района
 - Используй эмодзи к месту
+- Учитывай контекст предыдущего разговора
 - Жесткий, но не злой тон
-- Высмеивай примитивность провокации
 - 1-2 предложения максимум
-- НЕ матерись сам, оставайся на уровень выше!`
+- НЕ матерись сам, оставайся на уровень выше!`, username, userGender, genderAddress, contextText)
 	} else {
-		systemPrompt = `Ты крутой пацан с района по имени Загичак, который общается в дружеском чате.
+		systemPrompt = fmt.Sprintf(`Ты крутой пацан с района по имени Загичак, который общается в дружеском чате.
 
-К тебе обратились в чате, но это НЕ запрос резюме. Ответь как живой друг-братан.
+ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:
+- Имя: %s  
+- Пол: %s
+- Обращайся: %s
+
+%s
 
 ТВОЙ СТИЛЬ:
 - Говоришь как пацан с улицы, но дружелюбно
-- Используешь сленг: "братан", "чел", "кореш", "тема", "движ", "кайф"
+- Используешь сленг: "братан/подруга", "чел", "кореш", "тема", "движ"
 - Эмодзи ставишь к месту, но не переборщиваешь
 - Можешь слегка подколоть, но дружески
 - Отвечаешь живо и естественно
-
-ПРИМЕРЫ ОТВЕТОВ:
-- "Ало братан! Че как дела? 😎"
-- "Йоу! Что надо, кореш? 🤘"
-- "Привет чел! Какие планы? 💪"
-- "Здарова! Че по жизни? 🔥"
-- "Что хотел, братан? Говори! 👂"
+- Учитывай контекст разговора, если есть
 
 ПРИНЦИПЫ:
 - 1-2 предложения максимум
-- Дружелюбный тон
+- Дружелюбный тон с учетом пола собеседника
 - Можешь спросить что нужно
-- Будь живым и отзывчивым`
+- Будь живым и отзывчивым
+- Если есть история диалога - продолжай в том же духе`, username, userGender, genderAddress, contextText)
 	}
 
 	userPrompt := fmt.Sprintf(`Пользователь %s написал тебе: "%s"
 
-Ответь в своем стиле.`, username, originalMessage)
+Ответь в своем стиле, учитывая контекст диалога.`, username, originalMessage)
 
 	resp, err := b.openai.CreateChatCompletion(
 		context.Background(),
@@ -1052,7 +1218,7 @@ func (b *Bot) generateSmartResponse(originalMessage string, username string, isP
 					Content: userPrompt,
 				},
 			},
-			MaxTokens:   200,
+			MaxTokens:   300,
 			Temperature: 0.8,
 		},
 	)
@@ -1064,18 +1230,18 @@ func (b *Bot) generateSmartResponse(originalMessage string, username string, isP
 	if len(resp.Choices) == 0 {
 		if isProvocation {
 			fallbackResponses := []string{
-				"Юморист нашелся 🤡 В детском саду таких шуток не было даже",
-				"Какая оригинальность! 🎨 Небось всю ночь придумывал",
-				"Ты случайно не из КВН сбежал? 😏 Такой же уровень юмора",
+				fmt.Sprintf("Юморист нашелся 🤡 В детском саду таких шуток не было даже, %s", genderAddress),
+				fmt.Sprintf("Какая оригинальность! 🎨 Небось всю ночь придумывал, %s", genderAddress),
+				fmt.Sprintf("Ты случайно не из КВН сбежал? 😏 Такой же уровень юмора, %s", genderAddress),
 			}
 			randomIndex := rand.Intn(len(fallbackResponses))
 			return fallbackResponses[randomIndex], nil
 		} else {
 			fallbackResponses := []string{
-				"Йоу! Че надо, братан? 😎",
-				"Привет чел! Говори что по делу 🤘",
-				"Здарова кореш! Какие вопросы? 💪",
-				"Ало! Что хотел узнать? 👂",
+				fmt.Sprintf("Йоу! Че надо, %s? 😎", genderAddress),
+				fmt.Sprintf("Привет чел! Говори что по делу 🤘", ""),
+				fmt.Sprintf("Здарова %s! Какие вопросы? 💪", genderAddress),
+				fmt.Sprintf("Ало! Что хотел узнать, %s? 👂", genderAddress),
 			}
 			randomIndex := rand.Intn(len(fallbackResponses))
 			return fallbackResponses[randomIndex], nil
@@ -1123,6 +1289,72 @@ func (b *Bot) isRoastMessage(text string) bool {
 	}
 
 	return false
+}
+
+func (b *Bot) handleBotReply(c telebot.Context) error {
+	message := c.Message()
+
+	log.Printf("Получен reply на сообщение бота от %s (ID: %d): %s",
+		message.Sender.Username, message.Sender.ID, message.Text)
+
+	isBotReply, threadID := b.isBotReply(c)
+	if !isBotReply {
+		return nil // Не reply на бота
+	}
+
+	log.Printf("Это reply на бота в thread: %s", threadID)
+
+	history, err := b.getDialogHistory(threadID, 5)
+	if err != nil {
+		log.Printf("Ошибка получения истории диалога: %v", err)
+		history = []DialogContext{}
+	}
+
+	username := message.Sender.Username
+	if username == "" {
+		username = message.Sender.FirstName
+	}
+
+	userFirstName := message.Sender.FirstName
+	userGender := "unknown"
+
+	if len(history) > 0 {
+		userGender = history[0].UserGender
+		log.Printf("Пол из истории: %s", userGender)
+	} else {
+		userGender = b.determineGender(userFirstName)
+		log.Printf("Новое определение пола для %s: %s", userFirstName, userGender)
+	}
+
+	isProvocation := b.isRoastMessage(message.Text)
+
+	response, err := b.generateSmartResponseWithContext(
+		message.Text, username, userGender, history, isProvocation)
+
+	if err != nil {
+		log.Printf("Ошибка генерации ответа с контекстом: %v", err)
+		if isProvocation {
+			response = "Юморист нашелся 🤡 В детском саду таких шуток не было даже"
+		} else {
+			response = "Братан, не расслышал! Повтори еще раз 👂"
+		}
+	}
+
+	sentMessage, err := c.Bot().Send(c.Chat(), response)
+	if err != nil {
+		log.Printf("Ошибка отправки ответа: %v", err)
+		return err
+	}
+
+	messageOrder := len(history) + 1
+	b.saveDialogContext(
+		c.Chat().ID, message.Sender.ID, userFirstName,
+		message.Text, response,
+		sentMessage.ID, message.ID, threadID, messageOrder)
+
+	log.Printf("Reply обработан и сохранен в thread %s", threadID)
+
+	return nil
 }
 
 func (b *Bot) handleApprove(c telebot.Context) error {
@@ -1269,7 +1501,9 @@ func (b *Bot) isSummaryRequest(text string) bool {
 
 	summaryTriggers := []string{
 		"что было", "что происходило", "резюме", "саммари", "summary",
-		"сегодня", "вчера", "позавчера"}
+		"сегодня", "вчера", "позавчера",
+		"дн", "день", "дня", "дней",
+	}
 
 	for _, trigger := range summaryTriggers {
 		if strings.Contains(cleanText, trigger) {
@@ -1291,6 +1525,9 @@ func (b *Bot) handleMentions(c telebot.Context) error {
 		return b.handleSummaryRequest(c)
 	}
 
+	// Новый диалог - создаем новый threadID
+	threadID := generateThreadID(c.Chat().ID, message.Sender.ID, time.Now())
+
 	isProvocation := b.isRoastMessage(message.Text)
 
 	if isProvocation {
@@ -1304,7 +1541,12 @@ func (b *Bot) handleMentions(c telebot.Context) error {
 		username = message.Sender.FirstName
 	}
 
-	response, err := b.generateSmartResponse(message.Text, username, isProvocation)
+	userFirstName := message.Sender.FirstName
+	userGender := b.determineGender(userFirstName)
+
+	response, err := b.generateSmartResponseWithContext(
+		message.Text, username, userGender, []DialogContext{}, isProvocation)
+
 	if err != nil {
 		log.Printf("Ошибка генерации ответа: %v", err)
 		if isProvocation {
@@ -1316,7 +1558,20 @@ func (b *Bot) handleMentions(c telebot.Context) error {
 
 	log.Printf("Отвечаем пользователю %s в чате %d: %s", username, c.Chat().ID, response)
 
-	return c.Reply(response)
+	sentMessage, err := c.Bot().Send(c.Chat(), response)
+	if err != nil {
+		log.Printf("Ошибка отправки ответа: %v", err)
+		return err
+	}
+
+	b.saveDialogContext(
+		c.Chat().ID, message.Sender.ID, userFirstName,
+		message.Text, response,
+		sentMessage.ID, message.ID, threadID, 1)
+
+	log.Printf("Начат новый диалог в thread %s", threadID)
+
+	return nil
 }
 
 func (b *Bot) handleHelp(c telebot.Context) error {
@@ -1333,6 +1588,7 @@ func (b *Bot) handleHelp(c telebot.Context) error {
 <b>В групповых чатах:</b>
 • @zagichak_bot что было за сегодня/вчера - резюме чата
 • @zagichak_bot [любое сообщение] - общение с ботом
+• Отвечай на сообщения бота - ведите диалог! 💬
 • /roast_random - подкол случайному пользователю 🔥
 • /reminder_random - напоминание кому-то 😏  
 • /top_mat - топ матершинников чата 🤬
@@ -1347,6 +1603,7 @@ func (b *Bot) handleHelp(c telebot.Context) error {
 				"Добавь меня в группу и попробуй:\n"+
 				"• @zagichak_bot что было за сегодня - резюме чата\n"+
 				"• @zagichak_bot привет - просто поболтать\n"+
+				"• Отвечай на мои сообщения - ведем диалог! 💬\n"+
 				"• /roast_random - подколоть кого-то 🔥\n\n"+
 				"Я проанализирую сообщения и выдам самое интересное! ✨", &telebot.SendOptions{
 				ParseMode: telebot.ModeHTML,
@@ -1368,6 +1625,7 @@ func (b *Bot) handleHelp(c telebot.Context) error {
 
 <b>Общение:</b>
 • @zagichak_bot [любое сообщение] - поболтать с ботом
+• Отвечай на мои сообщения - ведем диалог! 💬
 
 <b>Развлечения:</b>
 • /roast_random - жесткий подкол случайному корешу 🔥
@@ -1430,9 +1688,13 @@ func main() {
 		bot.saveMessage(message)
 		go bot.maybeDoRandomAction(c)
 
+		if message.ReplyTo != nil && message.ReplyTo.Sender.Username == config.BotUsername {
+			log.Printf("Обнаружен reply на сообщение бота")
+			return bot.handleBotReply(c)
+		}
+
 		if strings.Contains(message.Text, "@"+config.BotUsername) {
 			log.Printf("Обнаружено упоминание бота в сообщении: %s", message.Text)
-
 			return bot.handleMentions(c)
 		}
 
@@ -1453,11 +1715,18 @@ func main() {
 				c.Chat().ID, today, tomorrow).
 			Count(&count)
 
-		return c.Reply(fmt.Sprintf("💾 Сегодня сохранено сообщений: %d\n📋 Chat ID: %d", count, c.Chat().ID))
+		var dialogCount int64
+		bot.db.Model(&DialogContext{}).
+			Where("chat_id = ?", c.Chat().ID).
+			Count(&dialogCount)
+
+		return c.Reply(fmt.Sprintf("💾 Сегодня сохранено сообщений: %d\n💬 Всего диалогов в БД: %d\n📋 Chat ID: %d",
+			count, dialogCount, c.Chat().ID))
 	})
 
 	go bot.startHealthServer()
 
 	log.Printf("Бот запущен! Username: @%s", config.BotUsername)
+	log.Printf("Новые функции: поддержка диалогов через replies, определение пола, контекст")
 	tgBot.Start()
 }
