@@ -1239,7 +1239,7 @@ func (b *Bot) generateSmartResponseWithContext(originalMessage string, username 
 		} else {
 			fallbackResponses := []string{
 				fmt.Sprintf("Йоу! Че надо, %s? 😎", genderAddress),
-				fmt.Sprintf("Привет чел! Говори что по делу 🤘", ""),
+				fmt.Sprintf("Привет %s! Говори что по делу 🤘", genderAddress),
 				fmt.Sprintf("Здарова %s! Какие вопросы? 💪", genderAddress),
 				fmt.Sprintf("Ало! Что хотел узнать, %s? 👂", genderAddress),
 			}
