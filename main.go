@@ -1126,7 +1126,6 @@ func (b *Bot) handleTopMat(c telebot.Context) error {
 	})
 }
 
-// Новая функция для генерации ответов с учетом контекста диалога
 func (b *Bot) generateSmartResponseWithContext(originalMessage string, username string, userGender string, dialogHistory []DialogContext, isProvocation bool) (string, error) {
 	var systemPrompt string
 
@@ -1299,12 +1298,12 @@ func (b *Bot) handleBotReply(c telebot.Context) error {
 
 	isBotReply, threadID := b.isBotReply(c)
 	if !isBotReply {
-		return nil // Не reply на бота
+		return nil
 	}
 
 	log.Printf("Это reply на бота в thread: %s", threadID)
 
-	history, err := b.getDialogHistory(threadID, 5)
+	history, err := b.getDialogHistory(threadID, 15)
 	if err != nil {
 		log.Printf("Ошибка получения истории диалога: %v", err)
 		history = []DialogContext{}
@@ -1340,7 +1339,9 @@ func (b *Bot) handleBotReply(c telebot.Context) error {
 		}
 	}
 
-	sentMessage, err := c.Bot().Send(c.Chat(), response)
+	sentMessage, err := c.Bot().Send(c.Chat(), response, &telebot.SendOptions{
+		ReplyTo: message,
+	})
 	if err != nil {
 		log.Printf("Ошибка отправки ответа: %v", err)
 		return err
@@ -1558,7 +1559,9 @@ func (b *Bot) handleMentions(c telebot.Context) error {
 
 	log.Printf("Отвечаем пользователю %s в чате %d: %s", username, c.Chat().ID, response)
 
-	sentMessage, err := c.Bot().Send(c.Chat(), response)
+	sentMessage, err := c.Bot().Send(c.Chat(), response, &telebot.SendOptions{
+		ReplyTo: message,
+	})
 	if err != nil {
 		log.Printf("Ошибка отправки ответа: %v", err)
 		return err
