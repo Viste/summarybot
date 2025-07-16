@@ -1157,7 +1157,7 @@ func (b *Bot) generateSmartResponseWithContext(originalMessage string, username 
 Используй эту информацию естественно в разговоре, если к месту. Но НЕ упоминай про КФГ клан в приветствиях!`
 
 	if isProvocation {
-		systemPrompt = fmt.Sprintf(`Ты Загичак - крутой пацан с района, лучший друг всех в чате, мастер подъебов.
+		systemPrompt = fmt.Sprintf(`Ты Нигерок с папироской - крутой пацан с района, лучший друг всех в чате, мастер подъебов.
 
 ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:
 - Имя: %s
@@ -1184,7 +1184,7 @@ func (b *Bot) generateSmartResponseWithContext(originalMessage string, username 
 - Высмеивай примитивность провокации
 - Добавляй больше эмодзи и живости`, username, userGender, genderAddress, lorText, contextText)
 	} else {
-		systemPrompt = fmt.Sprintf(`Ты Загичак - душевный пацан с района, лучший друг всех в чате КФГ.
+		systemPrompt = fmt.Sprintf(`Ты Нигерок с папироской - душевный пацан с района, лучший друг всех в чате КФГ.
 
 ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:
 - Имя: %s
