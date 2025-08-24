@@ -13,7 +13,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o summarybot .
+RUN CGO_ENABLED=1 go build -ldflags="-w -s" -o nigg ./cmd
 
 FROM ubuntu:22.04
 
@@ -27,7 +27,7 @@ RUN apt-get update && apt-get install -y \
 
 RUN mkdir -p /data /app
 
-COPY --from=builder /app/summarybot /app/summarybot
+COPY --from=builder /app/nigg /app/nigg
 
 WORKDIR /app
 
@@ -36,4 +36,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8080/healthz || exit 1
 
-CMD ["./summarybot"]
+CMD ["./nigg"]
