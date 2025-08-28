@@ -97,7 +97,7 @@ func registerHandlers(tgBot *telebot.Bot, botApp *bot.Bot, cfg *config.Config) {
 	tgBot.Handle("/roast_random", botApp.HandleRoastRandom)
 	tgBot.Handle("/reminder_random", botApp.HandleReminderRandom)
 	tgBot.Handle("/top_mat", botApp.HandleTopMat)
-	tgBot.Handle("/rap_nik", botApp.HandleRapNik)
+	tgBot.Handle("/rap_name", botApp.HandleRapNik)
 	// админские
 	tgBot.Handle("/approve", botApp.HandleApprove)
 	tgBot.Handle("/reject", botApp.HandleReject)
