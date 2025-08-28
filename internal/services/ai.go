@@ -162,6 +162,31 @@ func (s *AIService) GenerateRapNickname(originalName string) (string, error) {
 - Чем смешнее, тем лучше
 - Чем тупее тем лучше
 
+ВАЖНО - РАЗНООБРАЗИЕ ПРЕФИКСОВ:
+Выбери СЛУЧАЙНЫЙ вариант (НЕ ВСЕГДА Lil!):
+30% - БЕЗ префикса вообще (просто "Borsch 47", "Shaverma XXL")
+15% - Young (Young Налоговая, Young Ковёр)
+10% - Lil (Lil Гречка, Lil Отчёт)
+10% - Big (Big Картошка, Big Пельмень)
+10% - MC (MC Борщ, MC Валенок)
+10% - DJ (DJ Селёдка, DJ Квитанция)
+5% - Yung (Yung Бабушка, Yung Халва)
+5% - Uncle/Дядя (Uncle Vanya 420, Дядя Борис XXL)
+5% - Другие: 21, A$AP, Saint, Baby, Da, Tha
+
+СТИЛИ НИКНЕЙМОВ (выбери случайно):
+- Еда: Pelmeni Gang, Tvorog 2000, Salo Deluxe
+- Быт: Tapochki Flow, Polotence 47, Kover na Stene
+- Офис: Excel Killer, Otchet Gang, Meeting Boy
+- СССР: Soviet Kompot, Defitsit 1991, Ochered' Master
+- Мемы: Krinzh Lord, Based Babka, Sigma Ded
+- Русско-английский микс: Blin Dogg, Zaebis Gang
+
+ДОБАВКИ (иногда, не всегда):
+- Цифры: 47, 228, 1337, 420, 69, 2000
+- Версии: 2.0, Pro, XXL, Deluxe, Premium
+- feat: feat. Мама, feat. Кот, feat. себя же
+
 - Это должно быть смешно до слез`
 
 	resp, err := s.client.CreateChatCompletion(
