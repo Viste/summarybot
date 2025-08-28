@@ -308,6 +308,53 @@ func (b *Bot) HandleReminderRandom(c telebot.Context) error {
 	})
 }
 
+func (b *Bot) HandleRapNik(c telebot.Context) error {
+
+	if c.Chat().ID < 0 {
+		if !b.IsChatAllowed(c.Chat().ID) {
+			return c.Reply("⌛ У меня нет доступа к этому чату.")
+		}
+
+		user, err := b.statsSvc.GetRandomActiveUser(c.Chat().ID)
+		if err != nil {
+			return c.Reply("😔 Некому дать рэп-ник - в чате тишина!")
+		}
+
+		displayName := utils.GetUserDisplayName(user)
+		mention := utils.CreateUserMention(user)
+
+		nickname, err := b.aiSvc.GenerateRapNickname(displayName)
+		if err != nil {
+			nickname = "MC Error 500 feat. Глюк"
+		}
+
+		message := fmt.Sprintf("🎤 <b>Внимание! Рэп-крещение!</b>\n\n"+
+			"%s отныне в хип-хоп игре известен как:\n\n"+
+			"🔥 <b>%s</b> 🔥\n\n"+
+			"<i>Респект новой легенде андерграунда!</i> 💿",
+			mention, nickname)
+
+		return c.Reply(message, &telebot.SendOptions{
+			ParseMode: telebot.ModeHTML,
+		})
+	}
+
+	displayName := utils.GetUserDisplayName(c.Sender())
+
+	nickname, err := b.aiSvc.GenerateRapNickname(displayName)
+	if err != nil {
+		nickname = "Young 404 Not Found"
+	}
+
+	message := fmt.Sprintf("🎤 <b>Твой новый рэп-псевдоним:</b>\n\n"+
+		"🔥 <b>%s</b> 🔥\n\n"+
+		"<i>Теперь ты готов покорять чарты!</i> 💿", nickname)
+
+	return c.Reply(message, &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
+}
+
 // Вспомогательные тексты
 func getAdminHelpText() string {
 	return `🤖 <b>Помощь по боту (Админ)</b>
@@ -325,6 +372,8 @@ func getAdminHelpText() string {
 • /roast_random - подкол случайному пользователю 🔥
 • /reminder_random - напоминание кому-то 😁  
 • /top_mat - топ матершинников чата 🤬
+• /rap_nik - генератор рэп-псевдонимов 🎤
+
 
 Бот работает только в разрешенных групповых чатах! 🤖`
 }
@@ -361,6 +410,7 @@ func getGroupHelpText() string {
 • /roast_random - жесткий подкол случайному корешу 🔥
 • /reminder_random - "важное" напоминание кому-то 😁
 • /top_mat - топ матершинников чата 🤬
+• /rap_nik - генератор рэп-псевдонимов 🎤
 
 Я анализирую сообщения, делаю крутые резюме и веду живые диалоги! 🤖✨`
 }

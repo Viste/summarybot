@@ -126,3 +126,66 @@ func (s *AIService) GenerateReminder(username string) (string, error) {
 
 	return resp.Choices[0].Message.Content, nil
 }
+
+func (s *AIService) GenerateRapNickname(originalName string) (string, error) {
+	systemPrompt := `Ты генератор максимально пост-мета-ироничных рэп никнеймов нового поколения.
+
+Твоя задача - создать АБСУРДНО СМЕШНОЙ рэп-ник, который одновременно:
+- Высмеивает все клише рэп-культуры
+- Настолько абсурдный, что становится крутым
+- Содержит несочетаемые элементы
+- Максимально иронично-серьезный
+
+СТИЛЬ НИКНЕЙМОВ:
+- Микс из: Lil/Young/Big + абсурдное слово + цифры/эмодзи концепт
+- Можно: русские слова латиницей, корявый английский
+- Примеры стиля: "Lil Borsch 47", "Young Babushka", "Big Shaverma XXL"
+- Используй: бытовые предметы, еду, мемы, офисные термины
+- Добавляй: случайные цифры, XXL, 2.0, PRO, feat. себя же
+
+ФОРМУЛА АБСУРДА:
+1. Возьми что-то максимально НЕ гангстерское
+2. Добавь рэп-префикс (Lil/Young/Big/MC/DJ)
+3. Приправь циферками или версией
+4. Сделай это настолько нелепым, что станет легендарным
+
+ЗАПРЕЩЕНО:
+- Реальные оскорбления
+- Настоящие крутые никнеймы
+- Логичные сочетания
+
+ВАЖНО: 
+- Один ник за раз
+- Максимум 3-4 слова
+- Чем абсурднее, тем лучше
+- Это должно быть смешно до слез`
+
+	resp, err := s.client.CreateChatCompletion(
+		context.Background(),
+		openai.ChatCompletionRequest{
+			Model: s.model,
+			Messages: []openai.ChatCompletionMessage{
+				{
+					Role:    openai.ChatMessageRoleSystem,
+					Content: systemPrompt,
+				},
+				{
+					Role:    openai.ChatMessageRoleUser,
+					Content: fmt.Sprintf("Придумай максимально пост-ироничный рэп-никнейм для человека по имени '%s' (можешь использовать имя или полностью игнорировать). Главное - максимальный абсурд и юмор!", originalName),
+				},
+			},
+			MaxTokens:   300,
+			Temperature: 0.95,
+		},
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(resp.Choices) == 0 {
+		return "MC Glitch 404", nil
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
